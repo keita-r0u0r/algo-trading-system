@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from jqbt.infrastructure.env import load_env
+from jqbt.infrastructure.secrets import SecretError, build_secrets, require
 
 load_env(Path(__file__).resolve().parent)
 
@@ -65,15 +66,21 @@ def main() -> int:
     end = args.end or default_end
 
     if not args.rebuild_only:
-        client = JQuantsClient()
-        if not client.is_available:
+        # キーは秘密情報の取り出し口から読む（GCP Secret Manager / .env）。
+        # GCP を使う設定で読めなければ、.env に戻らずに止める
+        secrets = build_secrets()
+        try:
+            api_key = require(secrets, "jquants_api_key")
+        except SecretError as exc:
             print(
-                "JQUANTS_API_KEY が未設定です。\n"
-                "  https://jpx-jquants.com/ で登録し、ダッシュボードの\n"
-                "  [API Keys] で発行したキーを .env に設定してください。\n"
+                f"{exc}\n"
+                "  キーは https://jpx-jquants.com/ のダッシュボード [API Keys] で発行します。\n"
+                "  置き場所は docs/secrets.md を参照してください。\n"
                 "  それまでは scripts/run.py --synthetic で仕組みだけ確認できます。"
             )
             return 1
+        print(f"APIキーの読み込み元: {secrets.describe()}")
+        client = JQuantsClient(api_key=api_key)
 
         # 残りの営業日数から所要時間を出す。Free は5回/分なので、
         # 2年分だと100分近くかかる。走らせる前に分かるようにしておく
