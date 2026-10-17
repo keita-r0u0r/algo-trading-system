@@ -1,4 +1,4 @@
-.PHONY: install test fetch compare run holdout walkforward gui
+.PHONY: install test fetch compare run holdout walkforward gui docker-build docker-test docker-gui
 
 install:
 	pip install -e ".[dev]"
@@ -27,3 +27,17 @@ walkforward:
 # 運用の操作盤（http://127.0.0.1:8501）
 gui:
 	python scripts/gui.py
+
+# --- Docker ---------------------------------------------------------------
+# 相場データと台帳はイメージに入れず、このフォルダの data/ と state/ をつなぐ。
+# GUI はこのMacからだけ接続できるよう、127.0.0.1 に限って公開する
+IMAGE = algo-trading-system
+
+docker-build:
+	docker build -t $(IMAGE) .
+
+docker-test:
+	docker run --rm $(IMAGE)
+
+docker-gui:
+	docker run --rm -p 127.0.0.1:8501:8501 -v "$(PWD)/data:/app/data:ro" -v "$(PWD)/state:/app/state" $(IMAGE) python scripts/gui.py

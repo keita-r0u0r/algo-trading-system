@@ -1,0 +1,15 @@
+# 秘密情報・データ・台帳はイメージに入れない
+.env
+.env.*
+!.env.example
+data/
+state/
+*.db
+
+# 開発の生成物
+.git/
+.venv/
+**/__pycache__/
+.pytest_cache/
+*.egg-info/
+.claude/
