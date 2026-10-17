@@ -112,7 +112,7 @@ def equity_chart(series: pd.Series) -> None:
         x=alt.X("時刻:T", title=None),
         y=alt.Y("評価額:Q", scale=alt.Scale(zero=False), title="評価額（円）"),
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def cards(items: list[dict[str, str]], per_row: int = 2) -> None:
@@ -201,13 +201,13 @@ if page == "今日":
             st.subheader("保有")
             rows = vm.position_rows(status["positions"])
             if rows:
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
             else:
                 st.caption("保有はありません")
             st.caption(f"戦略 {status['strategy']} {status['params']} / 凍結した版 {status['version']} / 最後の入れ替え {status['last_rebalance'] or '—'}")
         with right:
             st.subheader("増額の条件（全部満たすまで資金を増やさない）")
-            st.dataframe(pd.DataFrame(vm.gate_rows(status["gates"])), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(vm.gate_rows(status["gates"])), hide_index=True, width="stretch")
         if status["planned"]:
             st.info(f"未約定の候補が {len(status['planned'])} 件あります（「売買候補と約定」で記録）")
 
@@ -230,7 +230,7 @@ if page == "売買候補と約定":
                     if result.already:
                         st.info("この日の候補は作成済みです")
                     if result.signals:
-                        st.dataframe(pd.DataFrame(vm.signal_rows(result.signals)), hide_index=True, use_container_width=True)
+                        st.dataframe(pd.DataFrame(vm.signal_rows(result.signals)), hide_index=True, width="stretch")
                     else:
                         st.caption("候補はありません" + ("" if result.due else "（今日は入れ替え日ではありません）"))
                     for text, why in result.rejected:
@@ -354,7 +354,7 @@ if page == "設定":
                 max_daily_loss=col2.number_input(vm.LIMIT_LABELS["max_daily_loss"], 0.0, 1.0, float(limits.max_daily_loss), 0.01),
             )
             change = vm.limit_change(limits, new)
-            st.dataframe(pd.DataFrame(change["rows"]), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(change["rows"]), hide_index=True, width="stretch")
             (st.warning if change["loosening"] else st.caption)(change["timing"])
             limit_reason = st.text_input("理由（監査ログに残ります）", key="limit_reason")
             if st.button("制限を変える", disabled=not change["changed"]):
@@ -382,17 +382,17 @@ if page == "履歴":
         st.subheader("約定")
         fills = vm.fill_rows(ops.ledger.fills())
         if fills:
-            st.dataframe(pd.DataFrame(fills), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(fills), hide_index=True, width="stretch")
         else:
             st.caption("まだありません")
         st.subheader("売買候補")
         signals = vm.signal_rows(ops.ledger.signals())
         if signals:
-            st.dataframe(pd.DataFrame(signals), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(signals), hide_index=True, width="stretch")
         else:
             st.caption("まだありません")
         st.subheader("設定変更の履歴（監査ログ）")
-        st.dataframe(pd.DataFrame(vm.audit_rows(ops.ledger.audit_log(200))), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(vm.audit_rows(ops.ledger.audit_log(200))), hide_index=True, width="stretch")
 
 # ----------------------------------------------------------------------
 # FX検証（ダミーデータ）
@@ -435,4 +435,4 @@ if page == "FX検証（ダミーデータ）":
         if result.trades:
             trades = pd.DataFrame([t.__dict__ for t in result.trades])
             st.caption("手仕舞いの理由: " + " / ".join(f"{k} {v}回" for k, v in trades["exit_reason"].value_counts().items()))
-            st.dataframe(trades.tail(200), hide_index=True, use_container_width=True)
+            st.dataframe(trades.tail(200), hide_index=True, width="stretch")
