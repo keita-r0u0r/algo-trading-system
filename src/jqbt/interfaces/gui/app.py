@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import os
 import subprocess
 from pathlib import Path
 
@@ -24,6 +23,7 @@ from jqbt.core.risk import RiskLimits
 from jqbt.infrastructure.env import load_env
 from jqbt.infrastructure.fx_synthetic import REGIMES, generate
 from jqbt.infrastructure.ledger import Ledger, kill_path, path_for
+from jqbt.infrastructure.secrets import SECRETS, SecretError, build_secrets
 from jqbt.interfaces import viewmodels as vm
 from jqbt.interfaces.composition import DataRequest, load_panel
 from jqbt.strategies import REGISTRY
@@ -78,6 +78,23 @@ def git_commit() -> tuple[str, bool]:
         return "unknown", False
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def secret_overview() -> list[str]:
+    """秘密情報の置き場所と、有無だけ。値は画面に出さない（5分ごとに確かめ直す）。"""
+    try:
+        source = build_secrets()
+        lines = [f"秘密情報: {source.describe()}"]
+        for name, spec in SECRETS.items():
+            try:
+                state = vm.secret_state(source.get(name))
+            except SecretError:
+                state = "読めません（ログインと権限を確認）"
+            lines.append(f"・{spec.description}: {state}")
+        return lines
+    except SecretError as exc:
+        return [f"秘密情報: 設定の誤り（{exc}）"]
+
+
 def now_text() -> str:
     return dt.datetime.now().isoformat(timespec="seconds")
 
@@ -127,7 +144,8 @@ except Exception as exc:  # データが無いときも画面は出す
 fresh = vm.freshness(latest, dt.date.today())
 st.sidebar.caption("相場データ")
 (st.sidebar.success if fresh["ok"] else st.sidebar.warning)(fresh["message"])
-st.sidebar.caption(f"J-Quants の APIキー: {vm.secret_state(os.environ.get('JQUANTS_API_KEY'))}")
+for line in secret_overview():
+    st.sidebar.caption(line)
 if kill_path(profile).exists():
     st.sidebar.error("キルスイッチが入っています")
 st.sidebar.divider()

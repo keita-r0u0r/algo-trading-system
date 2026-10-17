@@ -62,7 +62,7 @@ make gui                  # または python scripts/gui.py
 | FX検証（ダミーデータ） | 値動きの性質・戦略・スプレッドを変えて試す。**成績の根拠にはならない** |
 
 画面と CLI（`scripts/ops.py`）は、同じ台帳とキルスイッチを使う。どちらから操作してもよい。
-APIキーは画面に出さない（「設定済み / 未設定」だけ）。
+APIキーは画面に出さない（置き場所と「設定済み / 未設定」だけ）。置き場所は [secrets.md](secrets.md)（GCP Secret Manager を推奨）。
 
 ## 安全装置
 

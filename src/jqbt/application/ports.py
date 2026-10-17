@@ -96,3 +96,15 @@ class LedgerPort(Protocol):
 
     def save_equity(self, date: str, equity: float, cash: float) -> None: ...
     def equity_curve(self) -> list[tuple[str, float, float]]: ...
+
+
+class SecretSource(Protocol):
+    """秘密情報（APIキーなど）の取り出し口。
+
+    実装は ``infrastructure/secrets.py``（GCP Secret Manager / .env）。
+    **値をログやエラーメッセージに出さない。** 画面には有無だけを出す。
+    """
+
+    backend: str
+
+    def get(self, name: str) -> str | None: ...
