@@ -10,7 +10,7 @@ test:
 compare:
 	python scripts/run.py --compare --synthetic --random-runs 40
 
-# 実データの取り込み（JQUANTS_API_KEY が必要）
+# 実データの取り込み（APIキーが必要。置き場所は docs/secrets.md）
 fetch:
 	python scripts/fetch.py --years 2
 
