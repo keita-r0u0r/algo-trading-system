@@ -1,7 +1,7 @@
 [project]
 name = "jqbt"
 version = "0.1.0"
-description = "国内株のバックテスト環境（研究用）"
+description = "国内株と FX の売買ルールの検証と、少額運用のための環境（研究用）"
 requires-python = ">=3.11"
 dependencies = [
     "pandas>=2.2",

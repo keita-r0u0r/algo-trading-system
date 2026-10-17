@@ -51,7 +51,7 @@ read -rs "V?J-Quants の APIキー: "; echo; printf %s "$V" | gcloud secrets ver
 GMOコインのキーとシークレットも、シークレット名を替えて同じように入れます。
 
 ```bash
-# 4. このMacのプログラムが、あなたの権限で読めるようにする
+# 4. このマシンのプログラムが、ログインしたアカウントの権限で読めるようにする
 gcloud auth application-default login
 
 # 5. このリポジトリで GCP を使う設定にする
