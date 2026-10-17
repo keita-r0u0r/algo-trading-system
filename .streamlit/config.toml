@@ -1,0 +1,9 @@
+# 運用の操作盤の設定。外から触れないよう、このMacからだけ接続できるようにする
+[server]
+address = "127.0.0.1"
+port = 8501
+headless = true
+
+[browser]
+# 利用状況を外部に送らない
+gatherUsageStats = false
