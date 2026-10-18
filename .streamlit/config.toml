@@ -7,3 +7,6 @@ headless = true
 [browser]
 # 利用状況を外部に送らない
 gatherUsageStats = false
+# 表示用のアドレスを固定する。固定しないと、起動時に外部のサービスへ問い合わせて
+# 自分のグローバルIPアドレスを調べ、ログに出す（実際には外からつながらないが、余計な通信）
+serverAddress = "localhost"

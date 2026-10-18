@@ -72,6 +72,17 @@ python scripts/fx_research.py                   # FX（ダミーデータ）
 make gui                                         # 操作盤 → http://127.0.0.1:8501
 ```
 
+### Docker で動かす
+
+秘密情報（`.env`）と相場データ・台帳はイメージに入れません。データは実行時にこのフォルダの `data/` と `state/` をつなぎます。
+GUI は、このマシンの `127.0.0.1` にだけ公開します。
+
+```bash
+make docker-build     # イメージを作る
+make docker-test      # コンテナの中で全テストを回す
+make docker-gui       # 操作盤 → http://127.0.0.1:8501
+```
+
 ### 実データを使う
 
 1. J-Quants（https://jpx-jquants.com/）でキーを発行する
