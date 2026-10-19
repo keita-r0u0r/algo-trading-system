@@ -22,7 +22,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from ..core.accounting import apply_fill
-from ..core.contracts import Fill, Portfolio, Side
+from ..core.contracts import Fill, Order, Portfolio, Side
 from ..core.gates import (
     Check,
     GateThresholds,
@@ -276,6 +276,10 @@ class OperationsService:
         if due and getattr(strategy, "ready", True):
             self.ledger.set_state("last_rebalance", as_of.isoformat(), reason="入れ替え日", at=as_of.isoformat())
 
+        return self._store(as_of, self._check(as_of, orders, portfolio), due)
+
+    def _check(self, as_of: dt.date, orders: list, portfolio: Portfolio) -> RiskResult:
+        """注文をリスク制限に照らす。戦略の候補も、外部からの候補も、ここを必ず通る。"""
         frame = self._section(as_of)
         prices = {o.symbol: self._raw(frame, o.symbol, "close") for o in orders}
         holdings = {p.symbol: p.quantity for p in portfolio.open_positions}
@@ -288,7 +292,7 @@ class OperationsService:
         previous = curve[-2][1] if len(curve) >= 2 else (curve[-1][1] if curve else equity)
         day_return = equity / previous - 1.0 if previous else 0.0
 
-        result = check_orders(
+        return check_orders(
             orders,
             prices={s: p for s, p in prices.items() if p},
             holdings=holdings,
@@ -297,7 +301,22 @@ class OperationsService:
             limits=self.limits,
             lot_size=self.lot_size,
         )
-        return self._store(as_of, result, due)
+
+    def submit_orders(self, as_of: dt.date, orders: list, *, source: str) -> PlanResult:
+        """外部（拡張パーツなど）からの売買候補を受け取る差し込み口。
+
+        **ペーパー運用（モード2）でのみ受け付ける。** 実運用の候補は、凍結した戦略だけが出す。
+        受け取った候補は、戦略の候補と同じリスク制限を必ず通り、通ったものだけが台帳に残る。
+        理由の先頭に ``source`` を付けて、どこから来た候補かを記録する。
+        """
+        if not self.initialized:
+            raise OperationsError("未初期化です。先に init してください")
+        if self.mode is not Mode.PAPER:
+            raise OperationsError("外部からの売買候補は、ペーパー運用（モード2）でのみ受け付けます")
+        if as_of not in self.index.dates:
+            raise OperationsError(f"{as_of} のデータがありません")
+        tagged = [Order(o.symbol, o.side, o.quantity, reason=f"[{source}] {o.reason}".strip()) for o in orders]
+        return self._store(as_of, self._check(as_of, tagged, self.portfolio(upto=as_of)), due=True)
 
     def _store(self, as_of: dt.date, result: RiskResult, due: bool) -> PlanResult:
         version = self.ledger.get_state("version", "") or ""

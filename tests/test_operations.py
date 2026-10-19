@@ -174,3 +174,25 @@ def test_paper_fills_never_count_as_measured_slippage(service):
     assert stats.mean_slippage is None
     slippage = next(c for c in service.gates() if c.name == "スリッページ")
     assert not slippage.ok
+
+
+def test_external_orders_are_accepted_only_in_paper_mode(service):
+    from jqbt.core.contracts import Order
+
+    init(service, Mode.SIGNAL)
+    with pytest.raises(OperationsError, match="ペーパー"):
+        service.submit_orders(LAST, [Order("A", "buy", 1)], source="AI")
+
+
+def test_external_orders_pass_the_risk_limits_and_are_tagged(service):
+    from jqbt.core.contracts import Order
+
+    init(service, Mode.PAPER)  # 1注文の上限 5,000円
+    price = float(make_panel().xs("A", level="symbol")["close"].iloc[-1])
+    result = service.submit_orders(LAST, [Order("A", "buy", 1_000, reason="理由")], source="AI")
+
+    (signal,) = result.signals
+    assert signal["reason"].startswith("[AI]")
+    assert signal["quantity"] * price <= 5_000  # 上限まで減らされた
+    # 台帳に「未約定の候補」として残り、通常の約定記録の流れに乗る
+    assert [s["id"] for s in service.ledger.signals("planned")] == [signal["id"]]

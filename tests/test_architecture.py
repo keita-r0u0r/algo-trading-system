@@ -208,3 +208,24 @@ def test_no_stale_top_level_modules():
     stale = {"engine.py", "costs.py", "metrics.py", "dataset.py", "jquants.py", "synthetic.py"}
     present = {p.name for p in SRC.glob("*.py")}
     assert not (present & stale), f"移動し忘れ: {sorted(present & stale)}"
+
+
+def test_core_layers_never_import_extensions():
+    """本体は拡張パーツを import しない。名前でだけ読み込む（interfaces/extensions.py）。
+
+    パーツを消しても、無効にしても、本体がそのまま動くための約束。
+    """
+    for layer in LAYERS:
+        for path in python_files(layer):
+            tree = parse(path)
+            for node in ast.walk(tree):
+                module = None
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    if node.level and module.split(".")[0] == "extensions":
+                        module = "jqbt.extensions"
+                elif isinstance(node, ast.Import):
+                    module = ",".join(alias.name for alias in node.names)
+                assert "jqbt.extensions" not in (module or ""), (
+                    f"{path.relative_to(SRC)} が拡張パーツを import しています。本体は名前でだけ読み込むこと"
+                )

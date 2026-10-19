@@ -34,10 +34,11 @@ gui:
 IMAGE = algo-trading-system
 
 docker-build:
-	docker build -t $(IMAGE) .
+	docker build --build-arg JQBT_VERSION=$$(git rev-parse --short HEAD)$$(git diff --quiet -- src scripts || echo +未コミットの変更あり) -t $(IMAGE) .
 
 docker-test:
 	docker run --rm $(IMAGE)
 
 docker-gui:
-	docker run --rm -p 127.0.0.1:8501:8501 -v "$(PWD)/data:/app/data:ro" -v "$(PWD)/state:/app/state" $(IMAGE) python scripts/gui.py
+	docker run --rm -p 127.0.0.1:8501:8501 -v "$(PWD)/data:/app/data:ro" -v "$(PWD)/state:/app/state" \
+		-e JQBT_EXTENSIONS -e AI_MONTHLY_BUDGET_USD $(IMAGE) python scripts/gui.py

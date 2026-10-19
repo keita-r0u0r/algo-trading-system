@@ -18,6 +18,7 @@
 | 運用 | 売買候補、約定の記録、リスク制限、増額の条件、キルスイッチ、監査ログ | `scripts/ops.py` |
 | 操作盤（GUI） | 上の運用を画面で。このMacからだけ接続できる | `make gui` |
 | 秘密情報 | APIキーは GCP Secret Manager から読む（手元の開発では `.env` も可） | [docs/secrets.md](docs/secrets.md) |
+| 拡張パーツ | 後から付け外しできる機能。いまは AI（Claude）がある | [docs/extensions.md](docs/extensions.md) / [docs/ai.md](docs/ai.md) |
 
 ---
 
@@ -311,6 +312,8 @@ src/jqbt/
 │  ├─ reporting.py           結果の整形
 │  ├─ viewmodels.py          画面に出す値（純粋関数）
 │  └─ gui/app.py             操作盤（Streamlit）
+├─ extensions/               拡張パーツ（本体からは import しない。名前で読み込む）
+│  └─ ai/                    AI（Claude）
 └─ strategies/               売買ルール
    ├─ baselines.py           買って持つだけ / ランダム（★先にこれと比べる）
    ├─ sma_cross.py           移動平均クロス（たたき台）
@@ -319,7 +322,7 @@ src/jqbt/
    └─ __init__.py            REGISTRY（ファクトリとパラメータ格子）
 
 scripts/  fetch.py  run.py  validate.py  research.py  ops.py  gui.py  fx_research.py
-docs/     operations.md（運用の手順）  secrets.md（秘密情報）
+docs/     operations.md（運用の手順）  secrets.md（秘密情報）  extensions.md（拡張パーツ）  ai.md（AI）
 ```
 
 新しい戦略は `strategies/` に書き、`REGISTRY` にファクトリとパラメータ格子を登録します。
