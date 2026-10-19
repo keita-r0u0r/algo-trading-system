@@ -41,4 +41,4 @@ docker-test:
 
 docker-gui:
 	docker run --rm -p 127.0.0.1:8501:8501 -v "$(PWD)/data:/app/data:ro" -v "$(PWD)/state:/app/state" \
-		-e JQBT_EXTENSIONS -e AI_MONTHLY_BUDGET_USD $(IMAGE) python scripts/gui.py
+		-e JQBT_EXTENSIONS -e AI_MONTHLY_BUDGET_USD -e AI_MODEL $(IMAGE) python scripts/gui.py

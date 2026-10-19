@@ -28,15 +28,16 @@ def budget_from_env(environ: Any = None) -> AiBudget:
         return AiBudget()
 
 
-def build_assistant(secrets: Any = None, model: Any = None, usage: Any = None) -> AiAssistant:
-    """本物の部品をつないで、アシスタントを作る。テストでは model と usage を差し替える。"""
+def build_assistant(secrets: Any = None, model: Any = None, usage: Any = None, settings: Any = None) -> AiAssistant:
+    """本物の部品をつないで、アシスタントを作る。テストでは model・usage・settings を差し替える。"""
+    from .models import ModelSettings
     from .usage import JsonlUsageLog
 
     if model is None:
         from .claude import ClaudeModel
 
         model = ClaudeModel(api_key=require(secrets or build_secrets(), SECRET.key))
-    return AiAssistant(model, usage or JsonlUsageLog(), budget_from_env())
+    return AiAssistant(model, usage or JsonlUsageLog(), budget_from_env(), settings or ModelSettings())
 
 
 class AiExtension:
