@@ -13,7 +13,7 @@ WORKDIR /app
 # 依存を先に入れる。コードだけ変えたときに、ここからやり直さずに済む
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install -e ".[dev,gui,gcp]"
+RUN pip install -e ".[dev,gui,gcp,ai]"
 
 COPY scripts ./scripts
 COPY tests ./tests
@@ -23,6 +23,10 @@ COPY Makefile .env.example ./
 # root では動かさない
 RUN useradd --create-home --uid 1000 app && mkdir -p data state && chown -R app:app /app
 USER app
+
+# 凍結した版を記録するための Git の版（コンテナの中には Git が無いので、作るときに渡す）
+ARG JQBT_VERSION=unknown
+ENV JQBT_VERSION=${JQBT_VERSION}
 
 # GUI: コンテナの中では全インターフェースで待ち受ける。
 # 外への公開は、ホスト側で 127.0.0.1 に絞る（docker run -p 127.0.0.1:8501:8501）

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import subprocess
 import sys
 from dataclasses import asdict, replace
@@ -61,7 +62,9 @@ def git_version() -> tuple[str, bool]:
         )
         return commit, dirty
     except (OSError, subprocess.CalledProcessError):
-        return "unknown", False
+        # Docker の中には Git が無い。イメージを作るときに渡した版を使う（make docker-build）
+        version = os.environ.get("JQBT_VERSION", "unknown")
+        return version.split("+")[0], "+" in version
 
 
 def parse_params(items: list[str]) -> dict:

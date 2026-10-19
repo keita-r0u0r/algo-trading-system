@@ -49,6 +49,11 @@ SECRETS: dict[str, SecretName] = {
 }
 
 
+def register_secret(spec: SecretName) -> None:
+    """拡張パーツが、自分の使う秘密情報を一覧に足す。同じ名前の登録は上書きしない。"""
+    SECRETS.setdefault(spec.key, spec)
+
+
 def _spec(name: str) -> SecretName:
     if name not in SECRETS:
         raise SecretError(f"未知の秘密情報: {name}（{', '.join(SECRETS)}）")

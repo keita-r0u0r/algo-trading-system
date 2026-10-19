@@ -16,6 +16,8 @@ dev = ["pytest>=8.0", "matplotlib>=3.8", "duckdb>=1.0", "jupyter"]
 gui = ["streamlit>=1.40"]
 # 秘密情報を GCP Secret Manager から読む（docs/secrets.md）
 gcp = ["google-cloud-secret-manager>=2.20"]
+# 拡張パーツ: AI（Claude）。JQBT_EXTENSIONS=ai で有効にする（docs/ai.md）
+ai = ["anthropic>=1.15"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import subprocess
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from jqbt.infrastructure.ledger import Ledger, kill_path, path_for
 from jqbt.infrastructure.secrets import SECRETS, SecretError, build_secrets
 from jqbt.interfaces import viewmodels as vm
 from jqbt.interfaces.composition import DataRequest, load_panel
+from jqbt.interfaces.extensions import GuiContext, enabled_names, load
 from jqbt.strategies import REGISTRY
 from jqbt.strategies.fx import BollingerRevert, EmaCross, RandomFx, RangeBreakout
 
@@ -40,6 +42,12 @@ FX_STRATEGIES = {
 }
 
 load_env()
+
+
+@st.cache_resource
+def extensions():
+    """拡張パーツ（JQBT_EXTENSIONS で有効にしたもの）。本体はパーツを名前でだけ知っている。"""
+    return load(enabled_names())
 st.set_page_config(page_title="運用の操作盤", layout="wide")
 
 
@@ -75,7 +83,9 @@ def git_commit() -> tuple[str, bool]:
                                     capture_output=True, text=True, check=True).stdout.strip())
         return commit, dirty
     except (OSError, subprocess.CalledProcessError):
-        return "unknown", False
+        # Docker の中には Git が無い。イメージを作るときに渡した版を使う（make docker-build）
+        version = os.environ.get("JQBT_VERSION", "unknown")
+        return version.split("+")[0], "+" in version
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -132,8 +142,10 @@ profile = st.sidebar.radio(
     format_func=lambda p: "ペーパー（仮想の約定）" if p == "paper" else "実運用（実際の約定を記録）",
 )
 PAGES = ["今日", "売買候補と約定", "設定", "履歴", "FX検証（ダミーデータ）"]
+#: 拡張パーツが足す画面（タイトル → 描画の関数）
+EXTENSION_PAGES = {page.title: page.render for ext in extensions().extensions for page in ext.gui_pages()}
 # タブは描き直すと先頭に戻るので、選んだ画面が保たれるサイドバーで切り替える
-page = st.sidebar.radio("画面", PAGES, key="page")
+page = st.sidebar.radio("画面", PAGES + list(EXTENSION_PAGES), key="page")
 try:
     panel, index = market()
     latest = index.dates[-1]
@@ -146,6 +158,12 @@ st.sidebar.caption("相場データ")
 (st.sidebar.success if fresh["ok"] else st.sidebar.warning)(fresh["message"])
 for line in secret_overview():
     st.sidebar.caption(line)
+loaded = extensions()
+if loaded.extensions or loaded.errors:
+    names = ", ".join(ext.title for ext in loaded.extensions) or "なし"
+    st.sidebar.caption(f"拡張パーツ: {names}")
+    for name, why in loaded.errors.items():
+        st.sidebar.warning(f"拡張パーツ {name} を読み込めません: {why}")
 if kill_path(profile).exists():
     st.sidebar.error("キルスイッチが入っています")
 st.sidebar.divider()
@@ -436,3 +454,9 @@ if page == "FX検証（ダミーデータ）":
             trades = pd.DataFrame([t.__dict__ for t in result.trades])
             st.caption("手仕舞いの理由: " + " / ".join(f"{k} {v}回" for k, v in trades["exit_reason"].value_counts().items()))
             st.dataframe(trades.tail(200), hide_index=True, width="stretch")
+
+# ----------------------------------------------------------------------
+# 拡張パーツの画面
+# ----------------------------------------------------------------------
+if page in EXTENSION_PAGES:
+    EXTENSION_PAGES[page](GuiContext(profile=profile, ops=ops, index=index, latest=latest, today=dt.date.today()))
