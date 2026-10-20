@@ -1,0 +1,10 @@
+# 台帳（SQLite）を Cloud Storage へ複製する設定。Cloud Run の中だけで使う（deploy/entrypoint.sh）。
+# Cloud Storage を直接つないだフォルダは、SQLite に要るファイルのロックが無いので、
+# 台帳はコンテナの中のディスクに置き、変更を数秒おきに複製する。起動時はここから戻す。
+dbs:
+  - path: ${JQBT_LEDGER_DIR}/ops_paper.db
+    replicas:
+      - url: gcs://${STATE_BUCKET}/litestream/ops_paper
+  - path: ${JQBT_LEDGER_DIR}/ops_live.db
+    replicas:
+      - url: gcs://${STATE_BUCKET}/litestream/ops_live

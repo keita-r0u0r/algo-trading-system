@@ -116,7 +116,7 @@ read -rs "V?Anthropic の APIキー: "; echo; printf %s "$V" | gcloud secrets ve
 ```
 
 **Docker で Vertex AI を使う場合**: コンテナの中には gcloud のログイン情報がありません。
-今は未対応です（手元の `make gui` で使ってください）。
+手元の `make gui` か、Cloud Run（[cloud-run.md](cloud-run.md)。サービス専用のアカウントで呼ぶ）で使ってください。
 
 ## 構成
 

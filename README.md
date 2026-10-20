@@ -16,7 +16,7 @@
 | 候補の比較 | 複数の手法を同じ物差しで並べ、偶然の当たりを補正する | `scripts/research.py` |
 | FX の検証 | 分足のスキャルピング・デイトレ。スプレッド・レバレッジ・ロスカット込み | `scripts/fx_research.py` |
 | 運用 | 売買候補、約定の記録、リスク制限、増額の条件、キルスイッチ、監査ログ | `scripts/ops.py` |
-| 操作盤（GUI） | 上の運用を画面で。このMacからだけ接続できる | `make gui` |
+| 操作盤（GUI） | 上の運用を画面で。手元（このMacからだけ）か、Cloud Run（自分のアカウントだけ） | `make gui` / [docs/cloud-run.md](docs/cloud-run.md) |
 | 秘密情報 | APIキーは GCP Secret Manager から読む（手元の開発では `.env` も可） | [docs/secrets.md](docs/secrets.md) |
 | 拡張パーツ | 後から付け外しできる機能。いまは AI（Claude / Gemini、Vertex AI 経由）がある | [docs/extensions.md](docs/extensions.md) / [docs/ai.md](docs/ai.md) |
 
@@ -322,7 +322,9 @@ src/jqbt/
    └─ __init__.py            REGISTRY（ファクトリとパラメータ格子）
 
 scripts/  fetch.py  run.py  validate.py  research.py  ops.py  gui.py  fx_research.py
-docs/     operations.md（運用の手順）  secrets.md（秘密情報）  extensions.md（拡張パーツ）  ai.md（AI）
+docs/     operations.md（運用の手順）  secrets.md（秘密情報）  extensions.md（拡張パーツ）  ai.md（AI）  cloud-run.md（Cloud Run）
+infra/    GCP の構成（OpenTofu）
+deploy/   Cloud Run での起動・台帳の複製・イメージの作り方
 ```
 
 新しい戦略は `strategies/` に書き、`REGISTRY` にファクトリとパラメータ格子を登録します。

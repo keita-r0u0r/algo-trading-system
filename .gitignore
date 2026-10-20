@@ -10,3 +10,8 @@ data/curated/
 notebooks/*.ipynb
 *.png
 state/
+
+# OpenTofu（infra/）。状態は Cloud Storage に置く。変数にはメールアドレスが入る
+infra/.terraform/
+infra/*.tfstate*
+infra/terraform.tfvars
