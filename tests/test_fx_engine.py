@@ -163,3 +163,47 @@ def test_strategies_see_only_the_past():
     data = bars([(i, i, i, i) for i in range(100, 105)])
     run_fx(data, Spy(), config())
     assert all(length == index + 1 and last == 100 + index for index, length, last in seen)
+
+
+# --- 実際の相場のデータ（GMOコイン）に合わせた約束 ------------------------------
+def test_fee_rate_makes_fills_worse():
+    """手数料 0.002%: 150円なら1通貨あたり 0.003円、不利な側へずれる。"""
+    fee = FxCosts(spread_pips=0, slippage_pips=0, stop_slippage_pips=0, fee_rate=0.00002)
+    assert fee.fill(150.0, True, INST) == pytest.approx(150.003)
+    assert fee.fill(150.0, False, INST) == pytest.approx(149.997)
+
+
+def test_fee_applies_to_stop_and_take():
+    fee = FxCosts(spread_pips=0, slippage_pips=0, stop_slippage_pips=0, fee_rate=0.00002)
+    long = FxPosition(units=1_000, price=150.0, stop=149.9, take=150.2)
+    price, reason = stop_or_take(long, 150.0, 150.0, 149.8, fee, INST)
+    assert reason == "損切り" and price == pytest.approx(149.9 - 149.9 * 0.00002)
+    price, reason = stop_or_take(long, 150.0, 150.3, 150.0, fee, INST)
+    assert reason == "利確" and price == pytest.approx(150.2 - 150.2 * 0.00002)
+
+
+def test_entry_uses_entry_leverage():
+    """新規は20倍まで: 1,000通貨 × 150円 ÷ 20 = 7,500円。資金 9,000円 × 80% = 7,200円では作れない。"""
+    inst = FxInstrument(min_units=1_000, leverage=25, losscut_ratio=1.0, entry_leverage=20)
+    assert inst.entry_margin(1_000, 150.0) == pytest.approx(7_500)
+    data = bars([(150, 150, 150, 150)] * 3)
+    result = run_fx(data, Script({0: FxSignal(1)}), config(initial_cash=9_000.0, instrument=inst))
+    assert result.skipped_entries == 1 and not result.trades
+
+
+def test_session_column_defines_the_day():
+    """営業日は朝6時に始まる。日付が変わっても同じ営業日なら手仕舞わない。"""
+    data = bars([(150, 150, 150, 150)] * 4, start="2025-01-06 23:58")
+    data["session"] = [pd.Timestamp("2025-01-06").date()] * 3 + [pd.Timestamp("2025-01-07").date()]
+    result = run_fx(data, Script({0: FxSignal(1)}), config(flat_at_day_end=True))
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_at == data.index[2] and result.trades[0].exit_reason == "日の終わり"
+
+
+def test_per_bar_spread_is_used_for_fills():
+    data = bars([(150, 150, 150, 150), (150, 150, 150, 150), (150, 150, 150, 150)])
+    data["spread"] = [0.2, 2.0, 0.2]
+    result = run_fx(data, Script({0: FxSignal(1), 1: FxSignal(0)}), config())
+    trade = result.trades[0]
+    assert trade.entry_price == pytest.approx(150.01)  # 足1の始値、スプレッド 2.0pips の半分
+    assert trade.exit_price == pytest.approx(149.999)  # 足2の始値、スプレッド 0.2pips の半分

@@ -28,9 +28,16 @@ class FxInstrument:
     leverage: float = 25.0
     #: 証拠金維持率（有効証拠金 ÷ 必要証拠金）がこれ以下でロスカット。業者により50〜100%。**要確認**
     losscut_ratio: float = 0.5
+    #: 新規の建玉を作るときのレバレッジの上限。None なら ``leverage`` と同じ
+    #: （GMOコインは、維持は25倍、新規の注文は20倍まで）
+    entry_leverage: float | None = None
 
     def required_margin(self, units: float, price: float) -> float:
         return abs(units) * price / self.leverage
+
+    def entry_margin(self, units: float, price: float) -> float:
+        """新規の建玉を作るのに要る証拠金。"""
+        return abs(units) * price / (self.entry_leverage or self.leverage)
 
     def round_units(self, units: float) -> float:
         """取引単位の倍数に切り捨てる（符号は保つ）。"""
@@ -46,11 +53,15 @@ class FxCosts:
     slippage_pips: float = 0.1
     #: 損切り（逆指値）の不利なずれ（pips）。値が走っているときに執行されるので大きめ
     stop_slippage_pips: float = 0.3
+    #: 約定金額に対する手数料の率（GMOコインの API は 0.002%）。約定価格を不利にずらして数える
+    fee_rate: float = 0.0
+    #: ロスカットされたときの手数料（円/通貨。GMOコインは 0.05円）
+    losscut_fee: float = 0.0
 
     def fill(self, mid: float, buying: bool, inst: FxInstrument, extra_pips: float | None = None) -> float:
-        """仲値から、実際に約定する価格。自分に不利な側へずらす。"""
+        """仲値から、実際に約定する価格。自分に不利な側へずらす（手数料も含む）。"""
         slip = self.slippage_pips if extra_pips is None else extra_pips
-        offset = (self.spread_pips / 2 + slip) * inst.pip
+        offset = (self.spread_pips / 2 + slip) * inst.pip + mid * self.fee_rate
         return mid + offset if buying else mid - offset
 
     def exit_mark(self, mid: float, units: float, inst: FxInstrument) -> float:
@@ -132,16 +143,18 @@ def stop_or_take(
         bid_open, bid_low, bid_high = bar_open - half, low - half, high - half
         if position.stop is not None and bid_low <= position.stop:
             base = min(position.stop, bid_open)
-            return base - costs.stop_slippage_pips * inst.pip, "損切り"
+            return base - costs.stop_slippage_pips * inst.pip - base * costs.fee_rate, "損切り"
         if position.take is not None and bid_high >= position.take:
-            return max(position.take, bid_open), "利確"
+            base = max(position.take, bid_open)
+            return base - base * costs.fee_rate, "利確"
     else:
         ask_open, ask_low, ask_high = bar_open + half, low + half, high + half
         if position.stop is not None and ask_high >= position.stop:
             base = max(position.stop, ask_open)
-            return base + costs.stop_slippage_pips * inst.pip, "損切り"
+            return base + costs.stop_slippage_pips * inst.pip + base * costs.fee_rate, "損切り"
         if position.take is not None and ask_low <= position.take:
-            return min(position.take, ask_open), "利確"
+            base = min(position.take, ask_open)
+            return base + base * costs.fee_rate, "利確"
     return None
 
 
