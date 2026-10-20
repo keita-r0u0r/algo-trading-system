@@ -163,3 +163,103 @@ def test_strategies_see_only_the_past():
     data = bars([(i, i, i, i) for i in range(100, 105)])
     run_fx(data, Spy(), config())
     assert all(length == index + 1 and last == 100 + index for index, length, last in seen)
+
+
+# --- 実際の相場のデータ（GMOコイン）に合わせた約束 ------------------------------
+def test_fee_rate_makes_fills_worse():
+    """手数料 0.002%: 150円なら1通貨あたり 0.003円、不利な側へずれる。"""
+    fee = FxCosts(spread_pips=0, slippage_pips=0, stop_slippage_pips=0, fee_rate=0.00002)
+    assert fee.fill(150.0, True, INST) == pytest.approx(150.003)
+    assert fee.fill(150.0, False, INST) == pytest.approx(149.997)
+
+
+def test_fee_applies_to_stop_and_take():
+    fee = FxCosts(spread_pips=0, slippage_pips=0, stop_slippage_pips=0, fee_rate=0.00002)
+    long = FxPosition(units=1_000, price=150.0, stop=149.9, take=150.2)
+    price, reason = stop_or_take(long, 150.0, 150.0, 149.8, fee, INST)
+    assert reason == "損切り" and price == pytest.approx(149.9 - 149.9 * 0.00002)
+    price, reason = stop_or_take(long, 150.0, 150.3, 150.0, fee, INST)
+    assert reason == "利確" and price == pytest.approx(150.2 - 150.2 * 0.00002)
+
+
+def test_entry_uses_entry_leverage():
+    """新規は20倍まで: 1,000通貨 × 150円 ÷ 20 = 7,500円。資金 9,000円 × 80% = 7,200円では作れない。"""
+    inst = FxInstrument(min_units=1_000, leverage=25, losscut_ratio=1.0, entry_leverage=20)
+    assert inst.entry_margin(1_000, 150.0) == pytest.approx(7_500)
+    data = bars([(150, 150, 150, 150)] * 3)
+    result = run_fx(data, Script({0: FxSignal(1)}), config(initial_cash=9_000.0, instrument=inst))
+    assert result.skipped_entries == 1 and not result.trades
+
+
+def test_session_column_defines_the_day():
+    """営業日は朝6時に始まる。日付が変わっても同じ営業日なら手仕舞わない。"""
+    data = bars([(150, 150, 150, 150)] * 4, start="2025-01-06 23:58")
+    data["session"] = [pd.Timestamp("2025-01-06").date()] * 3 + [pd.Timestamp("2025-01-07").date()]
+    result = run_fx(data, Script({0: FxSignal(1)}), config(flat_at_day_end=True))
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_at == data.index[2] and result.trades[0].exit_reason == "日の終わり"
+
+
+def test_per_bar_spread_is_used_for_fills():
+    data = bars([(150, 150, 150, 150), (150, 150, 150, 150), (150, 150, 150, 150)])
+    data["spread"] = [0.2, 2.0, 0.2]
+    result = run_fx(data, Script({0: FxSignal(1), 1: FxSignal(0)}), config())
+    trade = result.trades[0]
+    assert trade.entry_price == pytest.approx(150.01)  # 足1の始値、スプレッド 2.0pips の半分
+    assert trade.exit_price == pytest.approx(149.999)  # 足2の始値、スプレッド 0.2pips の半分
+
+
+def test_swap_is_paid_per_calendar_day_when_held_overnight():
+    """金曜の営業日から月曜の営業日へ持ち越すと、3日分のスワップ。"""
+    data = bars([(150, 150, 150, 150)] * 4, start="2025-01-10 23:58")
+    data["session"] = [pd.Timestamp("2025-01-10").date()] * 2 + [pd.Timestamp("2025-01-13").date()] * 2
+    result = run_fx(data, Script({0: FxSignal(1)}), config(swap_long=0.01))
+    # 1,000通貨 × 0.01円 × 3日 = 30円。期間の終わりに手仕舞う
+    assert result.trades[0].exit_reason == "期間の終わり"
+    assert result.summary["final"] == pytest.approx(100_000 + 30)
+
+
+def test_gotobi_days_move_weekends_to_friday():
+    import datetime as dt
+
+    from jqbt.strategies.fx import gotobi_days
+
+    days = gotobi_days(2026, 10)
+    assert dt.date(2026, 10, 9) in days  # 10日は土曜 → 9日（金）
+    assert dt.date(2026, 10, 23) in days  # 25日は日曜 → 23日（金）
+    assert dt.date(2026, 2, 27) in gotobi_days(2026, 2)  # 2月は月末（28日は土曜 → 27日）
+
+
+# --- リスクの度合い ----------------------------------------------------------
+def test_size_units_from_risk_and_leverage():
+    from jqbt.core.fx.model import RISK_PROFILES, size_units
+
+    inst = FxInstrument(min_units=100)
+    # 中: 1万円 × 1% = 100円 ÷ (20 pips × 0.01円) = 500通貨。レバレッジ5倍の上限（約316通貨）で切られる
+    assert size_units(RISK_PROFILES["medium"], 10_000, 158.0, 20, inst) == 316
+    # 最大: 250円 ÷ 0.2円 = 1,250通貨（20倍の上限 1,265通貨より小さい）
+    assert size_units(RISK_PROFILES["max"], 10_000, 158.0, 20, inst) == 1_250
+    # 小: 50円 ÷ (100 pips × 0.01円) = 50通貨 < 最小100 → 入らない
+    assert size_units(RISK_PROFILES["small"], 10_000, 158.0, 100, inst) == 0
+
+
+def test_daily_loss_limit_closes_and_halts_for_the_day():
+    from jqbt.core.fx.model import RiskProfile
+
+    risk = RiskProfile("test", risk_per_trade=1.0, max_leverage=100, daily_loss_limit=0.01, assumed_stop_pips=1000)
+    inst = FxInstrument(min_units=1, leverage=25, losscut_ratio=0.0)
+    # 1万円 × 100% ÷ (1000 pips × 0.01円) = 1,000通貨。1円下がると 1,000円（10%）の損で上限に届く
+    data = bars([(150, 150, 150, 150), (150, 150, 150, 150), (149, 149, 149, 149), (149, 149, 149, 149), (149, 149, 149, 149)])
+    plan = {0: FxSignal(1), 2: FxSignal(1)}
+    result = run_fx(data, Script(plan), config(initial_cash=10_000.0, instrument=inst, risk=risk))
+    assert result.trades[0].units == 1_000
+    assert result.trades[0].exit_reason == "1日の損失の上限"
+    assert len(result.trades) == 1 and result.skipped_entries == 1  # その日はもう入らない
+
+
+def test_no_trade_keeps_cash():
+    from jqbt.strategies.fx import NoTradeFx
+
+    data = bars([(150, 151, 149, 150)] * 5)
+    result = run_fx(data, NoTradeFx(), config())
+    assert result.summary["total_return"] == 0 and not result.trades

@@ -28,9 +28,16 @@ class FxInstrument:
     leverage: float = 25.0
     #: 証拠金維持率（有効証拠金 ÷ 必要証拠金）がこれ以下でロスカット。業者により50〜100%。**要確認**
     losscut_ratio: float = 0.5
+    #: 新規の建玉を作るときのレバレッジの上限。None なら ``leverage`` と同じ
+    #: （GMOコインは、維持は25倍、新規の注文は20倍まで）
+    entry_leverage: float | None = None
 
     def required_margin(self, units: float, price: float) -> float:
         return abs(units) * price / self.leverage
+
+    def entry_margin(self, units: float, price: float) -> float:
+        """新規の建玉を作るのに要る証拠金。"""
+        return abs(units) * price / (self.entry_leverage or self.leverage)
 
     def round_units(self, units: float) -> float:
         """取引単位の倍数に切り捨てる（符号は保つ）。"""
@@ -46,11 +53,15 @@ class FxCosts:
     slippage_pips: float = 0.1
     #: 損切り（逆指値）の不利なずれ（pips）。値が走っているときに執行されるので大きめ
     stop_slippage_pips: float = 0.3
+    #: 約定金額に対する手数料の率（GMOコインの API は 0.002%）。約定価格を不利にずらして数える
+    fee_rate: float = 0.0
+    #: ロスカットされたときの手数料（円/通貨。GMOコインは 0.05円）
+    losscut_fee: float = 0.0
 
     def fill(self, mid: float, buying: bool, inst: FxInstrument, extra_pips: float | None = None) -> float:
-        """仲値から、実際に約定する価格。自分に不利な側へずらす。"""
+        """仲値から、実際に約定する価格。自分に不利な側へずらす（手数料も含む）。"""
         slip = self.slippage_pips if extra_pips is None else extra_pips
-        offset = (self.spread_pips / 2 + slip) * inst.pip
+        offset = (self.spread_pips / 2 + slip) * inst.pip + mid * self.fee_rate
         return mid + offset if buying else mid - offset
 
     def exit_mark(self, mid: float, units: float, inst: FxInstrument) -> float:
@@ -132,16 +143,18 @@ def stop_or_take(
         bid_open, bid_low, bid_high = bar_open - half, low - half, high - half
         if position.stop is not None and bid_low <= position.stop:
             base = min(position.stop, bid_open)
-            return base - costs.stop_slippage_pips * inst.pip, "損切り"
+            return base - costs.stop_slippage_pips * inst.pip - base * costs.fee_rate, "損切り"
         if position.take is not None and bid_high >= position.take:
-            return max(position.take, bid_open), "利確"
+            base = max(position.take, bid_open)
+            return base - base * costs.fee_rate, "利確"
     else:
         ask_open, ask_low, ask_high = bar_open + half, low + half, high + half
         if position.stop is not None and ask_high >= position.stop:
             base = max(position.stop, ask_open)
-            return base + costs.stop_slippage_pips * inst.pip, "損切り"
+            return base + costs.stop_slippage_pips * inst.pip + base * costs.fee_rate, "損切り"
         if position.take is not None and ask_low <= position.take:
-            return min(position.take, ask_open), "利確"
+            base = min(position.take, ask_open)
+            return base + base * costs.fee_rate, "利確"
     return None
 
 
@@ -182,3 +195,39 @@ class FxSignal:
     stop_pips: float | None = None
     take_pips: float | None = None
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class RiskProfile:
+    """リスクの度合い。数量を「1回の損切りで資金の何%まで失ってよいか」から逆算する。
+
+    リスクを上げても、勝てるかどうかは変わらない。変わるのは振れ幅（と、コストの額）だけ。
+    """
+
+    name: str
+    #: 1回の損切りで失ってよい資金の割合
+    risk_per_trade: float
+    #: レバレッジの上限（建玉の金額 ÷ 資金）
+    max_leverage: float
+    #: 営業日の初めから資金がこの割合だけ減ったら、その日は手仕舞って新規をやめる
+    daily_loss_limit: float
+    #: 損切りの無い判断の数量は、この幅（pips）で損切りするものとして計算する
+    assumed_stop_pips: float = 100.0
+
+
+RISK_PROFILES = {
+    "small": RiskProfile("small", risk_per_trade=0.005, max_leverage=2, daily_loss_limit=0.02),
+    "medium": RiskProfile("medium", risk_per_trade=0.01, max_leverage=5, daily_loss_limit=0.04),
+    "max": RiskProfile("max", risk_per_trade=0.025, max_leverage=20, daily_loss_limit=0.10),
+}
+
+
+def size_units(risk: RiskProfile, equity: float, price: float, stop_pips: float | None, inst: FxInstrument) -> float:
+    """リスクの度合いから数量を決める（1通貨単位で切り捨て）。最小の注文数量に届かなければ 0（入らない）。"""
+    if equity <= 0 or price <= 0:
+        return 0.0
+    distance = (stop_pips or risk.assumed_stop_pips) * inst.pip
+    by_risk = equity * risk.risk_per_trade / distance
+    by_leverage = equity * risk.max_leverage / price
+    units = float(int(min(by_risk, by_leverage)))
+    return units if units >= inst.min_units else 0.0
