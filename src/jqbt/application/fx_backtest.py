@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 import numpy as np
@@ -68,6 +68,8 @@ class FxConfig:
     no_entry_last_bars: int = 15
     #: 日をまたがない（デイトレ）
     flat_at_day_end: bool = True
+    #: スプレッドがこれ（pips）を超える足では、新規の建玉を作らない（朝の切り替えなど）。None なら制限なし
+    max_entry_spread_pips: float | None = None
 
 
 @dataclass
@@ -90,14 +92,21 @@ class FxResult:
 
 
 def run_fx(bars: pd.DataFrame, strategy: FxStrategy, config: FxConfig = FxConfig()) -> FxResult:
-    """``bars`` は時刻を索引に、open / high / low / close（仲値）の列を持つ。"""
-    inst, costs = config.instrument, config.costs
+    """``bars`` は時刻を索引に、open / high / low / close（仲値）の列を持つ。
+
+    次の列は、あれば使う（実際の相場のデータ）。
+
+      * ``spread``  その足のスプレッド（pips）。無ければ ``config.costs.spread_pips`` で一定
+      * ``session`` その足が属する営業日。無ければ時刻の日付。日をまたがない「1日」の区切りになる
+    """
+    inst, base_costs = config.instrument, config.costs
     o = bars["open"].to_numpy(dtype=float)
     h = bars["high"].to_numpy(dtype=float)
     lo = bars["low"].to_numpy(dtype=float)
     c = bars["close"].to_numpy(dtype=float)
+    spread = bars["spread"].to_numpy(dtype=float) if "spread" in bars else None
     times = bars.index
-    day_of = np.array([t.date() for t in times])
+    day_of = np.asarray(bars["session"]) if "session" in bars else np.array([t.date() for t in times])
     n = len(c)
     # その日の残りの本数（この足を含まない）
     left = np.zeros(n, dtype=int)
@@ -120,8 +129,11 @@ def run_fx(bars: pd.DataFrame, strategy: FxStrategy, config: FxConfig = FxConfig
         trades.append(trade)
         position = FxPosition()
 
+    costs = base_costs
     for i in range(n):
         t = times[i]
+        if spread is not None:
+            costs = replace(base_costs, spread_pips=spread[i])
 
         # 1. 前の足の判断を、この足の始値で執行
         if pending is not None:
@@ -129,9 +141,12 @@ def run_fx(bars: pd.DataFrame, strategy: FxStrategy, config: FxConfig = FxConfig
             if pending.target != direction:
                 if position.is_open:
                     exit_at(costs.fill(o[i], not position.is_long, inst), t, pending.reason or "シグナル", o[i])
-                if pending.target != 0:
+                too_wide = config.max_entry_spread_pips is not None and costs.spread_pips > config.max_entry_spread_pips
+                if pending.target != 0 and too_wide:
+                    skipped += 1
+                elif pending.target != 0:
                     units = base_units * pending.target
-                    margin = inst.required_margin(units, o[i])
+                    margin = inst.entry_margin(units, o[i])
                     if margin > max(cash, 0) * config.max_margin_use:
                         skipped += 1
                     else:
@@ -156,6 +171,7 @@ def run_fx(bars: pd.DataFrame, strategy: FxStrategy, config: FxConfig = FxConfig
             if crossed:
                 mid = min(level, o[i]) if position.is_long else max(level, o[i])
                 price = costs.fill(mid, not position.is_long, inst, extra_pips=costs.stop_slippage_pips)
+                price += -costs.losscut_fee if position.is_long else costs.losscut_fee
                 exit_at(price, t, "強制ロスカット", mid)
                 equity[i] = cash
                 result.losscut, result.losscut_at = True, t
