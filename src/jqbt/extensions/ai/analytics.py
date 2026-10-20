@@ -23,9 +23,10 @@ import re
 from collections import defaultdict, deque
 from typing import Any
 
-from .models import spec
+from .models import PROVIDERS, normalize, spec, split
 
-TAG = re.compile(r"^\[AI:([^:\]]+):([0-9a-f]+)\]")
+#: [AI:<キー>:<呼び出しID>]。キーは「呼び出し先:モデルID」なのでコロンを含む
+TAG = re.compile(r"^\[AI:(.+):([0-9a-f]{6,})\]")
 MIN_TRADES = 30
 
 
@@ -90,6 +91,11 @@ def model_report(
     calls = [r for r in records if r.get("kind", "call") == "call"]
     ratings = [r for r in records if r.get("kind") == "rating"]
     outcomes = trade_outcomes(signals, fills)
+    # 古い記録（呼び出し先の無いモデル名）も、今の書き方にそろえて集計する
+    for r in calls + ratings:
+        if r.get("model"):
+            r["model"] = normalize(r["model"])
+    outcomes = {normalize(k): v for k, v in outcomes.items()}
     models = sorted({r.get("model") for r in calls if r.get("model")} | set(outcomes))
 
     rows = []
@@ -105,7 +111,7 @@ def model_report(
             roles[r.get("role", "?")] += 1
         rows.append({
             "model": model,
-            "label": spec(model).label,
+            "label": f"{spec(model).label}（{PROVIDERS.get(split(model)[0], split(model)[0])}）",
             "calls": len(mine),
             "roles": dict(roles),
             "success_rate": len(ok) / len(mine) if mine else None,

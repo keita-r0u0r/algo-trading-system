@@ -18,6 +18,8 @@ class ModelReply:
     #: 呼び出しの記録と結び付けるための ID（評価や戦績の集計に使う）
     call_id: str = ""
     latency_ms: int = 0
+    #: 実際に答えたモデル（サーバー側の切り替えが起きたときは、切り替え先）
+    served_model: str = ""
 
 
 class LanguageModel(Protocol):

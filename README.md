@@ -18,7 +18,7 @@
 | 運用 | 売買候補、約定の記録、リスク制限、増額の条件、キルスイッチ、監査ログ | `scripts/ops.py` |
 | 操作盤（GUI） | 上の運用を画面で。このMacからだけ接続できる | `make gui` |
 | 秘密情報 | APIキーは GCP Secret Manager から読む（手元の開発では `.env` も可） | [docs/secrets.md](docs/secrets.md) |
-| 拡張パーツ | 後から付け外しできる機能。いまは AI（Claude）がある | [docs/extensions.md](docs/extensions.md) / [docs/ai.md](docs/ai.md) |
+| 拡張パーツ | 後から付け外しできる機能。いまは AI（Claude / Gemini、Vertex AI 経由）がある | [docs/extensions.md](docs/extensions.md) / [docs/ai.md](docs/ai.md) |
 
 ---
 
@@ -313,7 +313,7 @@ src/jqbt/
 │  ├─ viewmodels.py          画面に出す値（純粋関数）
 │  └─ gui/app.py             操作盤（Streamlit）
 ├─ extensions/               拡張パーツ（本体からは import しない。名前で読み込む）
-│  └─ ai/                    AI（Claude）
+│  └─ ai/                    AI（Claude / Gemini）
 └─ strategies/               売買ルール
    ├─ baselines.py           買って持つだけ / ランダム（★先にこれと比べる）
    ├─ sma_cross.py           移動平均クロス（たたき台）

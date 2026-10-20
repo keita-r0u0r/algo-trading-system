@@ -17,7 +17,7 @@ gui = ["streamlit>=1.40"]
 # 秘密情報を GCP Secret Manager から読む（docs/secrets.md）
 gcp = ["google-cloud-secret-manager>=2.20"]
 # 拡張パーツ: AI（Claude）。JQBT_EXTENSIONS=ai で有効にする（docs/ai.md）
-ai = ["anthropic>=1.15"]
+ai = ["anthropic[vertex]>=1.15", "google-genai>=2.0"]
 
 [build-system]
 requires = ["setuptools>=68"]

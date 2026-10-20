@@ -24,11 +24,24 @@ from jqbt.extensions.ai.assistant import (
     AiAssistant,
     AiBudget,
     AiError,
+    RefusalError,
     research_context,
 )
 from jqbt.extensions.ai.claude import FALLBACK_BETA, ClaudeModel
-from jqbt.extensions.ai.models import CATALOG, DEFAULT_MODEL, ModelChoice, ModelSettings, cost_usd, spec
+from jqbt.extensions.ai.gemini import GeminiModel
+from jqbt.extensions.ai.models import (
+    DEFAULT_MODEL,
+    ModelCatalog,
+    ModelChoice,
+    ModelSettings,
+    ModelSpec,
+    cost_usd,
+    normalize,
+    spec,
+)
 from jqbt.extensions.ai.ports import ModelReply
+from jqbt.extensions.ai.providers import ProviderRouter
+from jqbt.infrastructure.secrets import EnvSecrets
 from jqbt.extensions.ai.usage import JsonlUsageLog
 
 TODAY = dt.date(2026, 10, 18)
@@ -36,11 +49,13 @@ USAGE = {"input_tokens": 1_000, "output_tokens": 500, "cache_read_input_tokens":
 
 
 class FakeModel:
-    def __init__(self, data=None, text="答え", error=None):
-        self.data, self.text, self.error, self.calls = data, text, error, []
+    def __init__(self, data=None, text="答え", error=None, refuse=()):
+        self.data, self.text, self.error, self.refuse, self.calls = data, text, error, set(refuse), []
 
     def ask(self, *, model, system, prompt, schema=None, effort="medium"):
         self.calls.append({"model": model, "system": system, "prompt": prompt, "schema": schema, "effort": effort})
+        if model in self.refuse:
+            raise RefusalError("AI が答えを控えました（分類: 不明）")
         if self.error:
             raise self.error
         return ModelReply(text=self.text, data=self.data if schema else None, model=model, usage=USAGE)
@@ -63,31 +78,113 @@ def assistant(model, usage, settings, budget=AiBudget()):
 # ----------------------------------------------------------------------
 # モデルの一覧・料金・設定
 # ----------------------------------------------------------------------
-def test_catalog_has_the_default_and_unknown_models_are_priced_at_the_top():
-    assert DEFAULT_MODEL in CATALOG
-    assert cost_usd(USAGE, "claude-opus-5-5") == pytest.approx((1_000 * 4 + 500 * 20) / 1e6)
-    top = max(cost_usd(USAGE, m) for m in CATALOG)
-    assert cost_usd(USAGE, "some-future-model") == pytest.approx(top)
-    assert not spec("some-future-model").fallback
+def test_default_is_claude_on_vertex_and_unknown_models_are_priced_at_the_top(tmp_path):
+    catalog = ModelCatalog(tmp_path / "models.json")
+    assert DEFAULT_MODEL == "vertex:claude-opus-5-5" and DEFAULT_MODEL in catalog.all()
+    assert cost_usd(USAGE, DEFAULT_MODEL, catalog) == pytest.approx((1_000 * 4 + 500 * 20) / 1e6)
+    top = max(cost_usd(USAGE, k, catalog) for k in catalog.all())
+    assert cost_usd(USAGE, "vertex:some-future-model", catalog) == pytest.approx(top)
+    assert not spec("vertex:some-future-model", catalog).server_fallback
 
 
-def test_settings_save_and_load_and_env_overrides_the_default(tmp_path):
+def test_old_style_names_are_read_as_anthropic_direct():
+    assert normalize("claude-opus-5-5") == "anthropic:claude-opus-5-5"
+    assert normalize("vertex:gemini-3.8-flash") == "vertex:gemini-3.8-flash"
+
+
+def test_models_can_be_added_and_bad_entries_are_rejected(tmp_path):
+    catalog = ModelCatalog(tmp_path / "models.json")
+    catalog.add(ModelSpec("vertex", "gemini-9-pro", "Gemini 9 Pro", "gemini", 1.0, 5.0, 0.1))
+    assert catalog.all()["vertex:gemini-9-pro"].output == 5.0
+    with pytest.raises(ValueError):
+        catalog.add(ModelSpec("nowhere", "x", "x", "claude", 1, 1, 0))
+    with pytest.raises(ValueError):
+        catalog.add(ModelSpec("vertex", "x", "x", "claude", -1, 1, 0))
+
+
+def test_settings_save_load_chain_and_env_override(tmp_path):
     store = ModelSettings(tmp_path / "s.json", environ={})
-    store.save(ModelChoice(default="claude-sonnet-5-5", per_role={"decide": "claude-fable-5-1", "bogus": "x"}))
+    store.save(ModelChoice(default="vertex:claude-sonnet-5-5", per_role={"decide": "vertex:claude-fable-5-1", "bogus": "x"},
+                           fallback_chain=["vertex:gemini-3.8-flash", "vertex:claude-sonnet-5-5"]))
     loaded = store.load()
-    assert loaded.model_for("explain") == "claude-sonnet-5-5"
-    assert loaded.model_for("decide") == "claude-fable-5-1"
-    assert "bogus" not in loaded.per_role  # 知らない役割は捨てる
-    assert ModelSettings(tmp_path / "s.json", environ={"AI_MODEL": "claude-haiku-5-5"}).load().default == "claude-haiku-5-5"
+    assert loaded.model_for("explain") == "vertex:claude-sonnet-5-5"
+    assert loaded.model_for("decide") == "vertex:claude-fable-5-1"
+    assert "bogus" not in loaded.per_role
+    # 既定と同じモデルは、切り替えの順番に二度は出てこない
+    assert loaded.attempts("explain") == ["vertex:claude-sonnet-5-5", "vertex:gemini-3.8-flash"]
+    env = ModelSettings(tmp_path / "s.json", environ={"AI_MODEL": "claude-haiku-5-5"}).load()
+    assert env.default == "anthropic:claude-haiku-5-5"
 
 
 def test_each_role_uses_its_configured_model(usage, settings):
-    settings.save(ModelChoice(default="claude-sonnet-5-5", per_role={"report": "claude-haiku-5-5"}))
+    settings.save(ModelChoice(default="vertex:claude-sonnet-5-5", per_role={"report": "vertex:claude-haiku-5-5"}))
     model = FakeModel(data={"status": "normal", "summary": "", "anomalies": [], "next_actions": []})
     ai = assistant(model, usage, settings)
     ai.explain("質問", {}, TODAY)
     ai.daily_report({}, TODAY)
-    assert [c["model"] for c in model.calls] == ["claude-sonnet-5-5", "claude-haiku-5-5"]
+    assert [c["model"] for c in model.calls] == ["vertex:claude-sonnet-5-5", "vertex:claude-haiku-5-5"]
+
+
+def test_a_refusal_moves_on_to_the_next_model_in_the_chain(usage, settings):
+    settings.save(ModelChoice(default="vertex:claude-opus-5-5", fallback_chain=["vertex:gemini-3.8-flash"]))
+    model = FakeModel(refuse={"vertex:claude-opus-5-5"})
+    reply = assistant(model, usage, settings).explain("質問", {}, TODAY)
+    assert reply.model == "vertex:gemini-3.8-flash"
+    first, second = usage.records()
+    assert (first["model"], first["ok"]) == ("vertex:claude-opus-5-5", False)
+    assert (second["model"], second["ok"]) == ("vertex:gemini-3.8-flash", True)
+
+
+def test_when_every_model_refuses_the_user_sees_which_were_tried(usage, settings):
+    settings.save(ModelChoice(default="vertex:claude-opus-5-5", fallback_chain=["vertex:gemini-3.8-flash"]))
+    model = FakeModel(refuse={"vertex:claude-opus-5-5", "vertex:gemini-3.8-flash"})
+    with pytest.raises(RefusalError, match="claude-opus-5-5 → vertex:gemini-3.8-flash"):
+        assistant(model, usage, settings).explain("質問", {}, TODAY)
+
+
+def test_other_errors_do_not_try_the_next_model(usage, settings):
+    settings.save(ModelChoice(default="vertex:claude-opus-5-5", fallback_chain=["vertex:gemini-3.8-flash"]))
+    model = FakeModel(error=AiError("認証に失敗しました"))
+    with pytest.raises(AiError, match="認証"):
+        assistant(model, usage, settings).explain("質問", {}, TODAY)
+    assert len(model.calls) == 1
+
+
+# ----------------------------------------------------------------------
+# 呼び出し先への振り分け
+# ----------------------------------------------------------------------
+class Recorder:
+    def __init__(self, name):
+        self.name, self.calls = name, []
+
+    def ask(self, **kwargs):
+        self.calls.append(kwargs)
+        return ModelReply(text="ok", data=None, model=kwargs["model"], usage=USAGE)
+
+
+def test_router_sends_each_key_to_its_provider_and_reports_back_the_key(tmp_path):
+    vc, vg, ac = Recorder("vertex-claude"), Recorder("vertex-gemini"), Recorder("anthropic-claude")
+    router = ProviderRouter(
+        environ={"GCP_PROJECT": "p"}, catalog=ModelCatalog(tmp_path / "m.json"),
+        factories={("vertex", "claude"): lambda: vc, ("vertex", "gemini"): lambda: vg, ("anthropic", "claude"): lambda: ac},
+    )
+    assert router.ask(model="vertex:claude-opus-5-5", system="s", prompt="p").model == "vertex:claude-opus-5-5"
+    router.ask(model="vertex:gemini-3.8-flash", system="s", prompt="p")
+    router.ask(model="anthropic:claude-opus-5-5", system="s", prompt="p")
+    assert vc.calls[0]["model"] == "claude-opus-5-5" and "server_fallback" not in vc.calls[0]
+    assert vg.calls[0]["model"] == "gemini-3.8-flash"
+    assert ac.calls[0]["server_fallback"] is True  # Anthropic 直接の Opus 5.5 だけサーバー側の切り替えを使う
+
+
+def test_readiness_explains_what_is_missing_without_calling_the_api(tmp_path):
+    catalog = ModelCatalog(tmp_path / "m.json")
+    ok, why = ProviderRouter(environ={}, catalog=catalog).readiness("vertex:claude-opus-5-5")
+    assert not ok and "GCP_PROJECT" in why
+    assert ProviderRouter(environ={"GCP_PROJECT": "p"}, catalog=catalog).readiness("vertex:claude-opus-5-5") == (True, "")
+    ok, why = ProviderRouter(environ={}, secrets=EnvSecrets({}), catalog=catalog).readiness("anthropic:claude-opus-5-5")
+    assert not ok and "APIキー" in why
+    ok, why = ProviderRouter(environ={}, catalog=catalog).readiness("anthropic:gemini-3.8-flash")
+    assert not ok and "Claude だけ" in why
 
 
 # ----------------------------------------------------------------------
@@ -225,13 +322,14 @@ def fill(id_, date, side, symbol, quantity, price, signal_id=None, fee=0.0):
 
 
 def test_tags_identify_ai_signals_only():
+    assert tag_of("[AI:vertex:claude-opus-5-5:abc123def456] AI判断") == ("vertex:claude-opus-5-5", "abc123def456")
     assert tag_of("[AI:claude-opus-5-5:abc123] AI判断") == ("claude-opus-5-5", "abc123")
     assert tag_of("regime_hold_50") is None
     assert tag_of(None) is None
 
 
 def test_profits_follow_the_model_that_bought_first_in_first_out():
-    signals = [signal(1, "[AI:opus:aa] 買い"), signal(2, "[AI:haiku:bb] 買い"), signal(3, "戦略の売り")]
+    signals = [signal(1, "[AI:opus:aaaaaa] 買い"), signal(2, "[AI:haiku:bbbbbb] 買い"), signal(3, "戦略の売り")]
     fills = [
         fill(1, "2026-01-05", "buy", "X", 10, 100, signal_id=1),   # opus が買う
         fill(2, "2026-01-06", "buy", "X", 10, 110, signal_id=2),   # haiku が買う
@@ -244,20 +342,20 @@ def test_profits_follow_the_model_that_bought_first_in_first_out():
 
 
 def test_fees_reduce_the_attributed_profit():
-    signals = [signal(1, "[AI:opus:aa] 買い")]
+    signals = [signal(1, "[AI:opus:aaaaaa] 買い")]
     fills = [fill(1, "2026-01-05", "buy", "X", 10, 100, 1, fee=10), fill(2, "2026-01-06", "sell", "X", 10, 100, fee=10)]
     assert trade_outcomes(signals, fills)["opus"]["pnls"] == [pytest.approx(-20)]
 
 
 def test_model_report_combines_calls_ratings_and_trades_and_warns_on_small_samples():
     records = [
-        {"kind": "call", "call_id": "aa", "model": "opus", "role": "decide", "ok": True, "latency_ms": 2000,
+        {"kind": "call", "call_id": "aaaaaa", "model": "vertex:opus", "role": "decide", "ok": True, "latency_ms": 2000,
          "cost_usd": 0.02, "decision": {"action": "buy", "confidence": "low"}},
-        {"kind": "call", "call_id": "cc", "model": "opus", "role": "explain", "ok": False,
+        {"kind": "call", "call_id": "cccccc", "model": "vertex:opus", "role": "explain", "ok": False,
          "error": "AI が答えを控えました", "latency_ms": 500, "cost_usd": 0.0},
-        {"kind": "rating", "call_id": "aa", "model": "opus", "score": 4},
+        {"kind": "rating", "call_id": "aaaaaa", "model": "vertex:opus", "score": 4},
     ]
-    signals = [signal(1, "[AI:opus:aa] 買い")]
+    signals = [signal(1, "[AI:vertex:opus:aaaaaa] 買い")]
     fills = [fill(1, "2026-01-05", "buy", "X", 10, 100, 1), fill(2, "2026-01-06", "sell", "X", 10, 105)]
     (row,) = model_report(records, signals, fills)
     assert row["calls"] == 2 and row["success_rate"] == 0.5 and row["refusals"] == 1
@@ -271,12 +369,15 @@ def test_model_report_combines_calls_ratings_and_trades_and_warns_on_small_sampl
 # Claude の呼び出し（偽のクライアント）
 # ----------------------------------------------------------------------
 class FakeClient:
+    """beta（サーバー側の切り替えあり）と通常の両方の口を持つ。"""
+
     def __init__(self, response=None, error=None):
         self.requests, self.response, self.error = [], response, error
-        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
+        self.beta = SimpleNamespace(messages=SimpleNamespace(create=lambda **r: self._create("beta", r)))
+        self.messages = SimpleNamespace(create=lambda **r: self._create("plain", r))
 
-    def _create(self, **request):
-        self.requests.append(request)
+    def _create(self, path, request):
+        self.requests.append((path, request))
         if self.error:
             raise self.error
         return self.response
@@ -292,36 +393,35 @@ def response(text, stop="end_turn", category=None, model="claude-opus-5-5"):
     )
 
 
-def test_request_sets_model_effort_schema_cache_and_fallback():
+def test_anthropic_direct_uses_effort_schema_cache_and_server_fallback():
     client = FakeClient(response('{"action": "hold"}'))
-    reply = ClaudeModel("key", client=client).ask(
+    reply = ClaudeModel(client=client, server_fallback=True).ask(
         model="claude-opus-5-5", system="前提", prompt="質問", schema=DECISION_SCHEMA, effort="high"
     )
-    request = client.requests[0]
-    assert request["model"] == "claude-opus-5-5"
+    path, request = client.requests[0]
+    assert path == "beta" and request["betas"] == [FALLBACK_BETA] and request["fallbacks"] == "default"
     assert request["output_config"] == {"effort": "high", "format": {"type": "json_schema", "schema": DECISION_SCHEMA}}
     assert request["system"][0]["cache_control"] == {"type": "ephemeral"}
-    assert request["betas"] == [FALLBACK_BETA] and request["fallbacks"] == "default"
     assert "thinking" not in request
     assert reply.data == {"action": "hold"} and reply.usage["input_tokens"] == 10
 
 
-@pytest.mark.parametrize("model", ["claude-haiku-5-5", "some-future-model"])
-def test_models_without_server_side_fallback_get_none(model):
-    client = FakeClient(response("ok", model=model))
-    ClaudeModel("key", client=client).ask(model=model, system="s", prompt="p")
-    assert "fallbacks" not in client.requests[0] and "betas" not in client.requests[0]
+def test_vertex_style_calls_have_no_server_fallback():
+    client = FakeClient(response("ok"))
+    ClaudeModel(client=client, server_fallback=False).ask(model="claude-opus-5-5", system="s", prompt="p")
+    path, request = client.requests[0]
+    assert path == "plain" and "fallbacks" not in request and "betas" not in request
 
 
 def test_refusal_and_truncation_are_reported():
-    with pytest.raises(AiError, match="控えました.*cyber"):
-        ClaudeModel("key", client=FakeClient(response("", stop="refusal", category="cyber"))).ask(system="s", prompt="p")
+    with pytest.raises(RefusalError, match="控えました.*cyber"):
+        ClaudeModel(client=FakeClient(response("", stop="refusal", category="cyber"))).ask(model="m", system="s", prompt="p")
     with pytest.raises(AiError, match="切れました"):
-        ClaudeModel("key", client=FakeClient(response("途中", stop="max_tokens"))).ask(system="s", prompt="p")
+        ClaudeModel(client=FakeClient(response("途中", stop="max_tokens"))).ask(model="m", system="s", prompt="p")
 
 
 def test_invalid_json_gives_no_data():
-    reply = ClaudeModel("key", client=FakeClient(response("not json"))).ask(system="s", prompt="p", schema={})
+    reply = ClaudeModel(client=FakeClient(response("not json"))).ask(model="m", system="s", prompt="p", schema={})
     assert reply.data is None
 
 
@@ -329,7 +429,58 @@ def test_api_errors_become_plain_messages_without_the_key():
     class AuthenticationError(Exception):
         pass
 
-    with pytest.raises(AiError, match="APIキーが正しくありません") as info:
-        ClaudeModel("sk-secret", client=FakeClient(error=AuthenticationError("bad sk-secret"))).ask(system="s", prompt="p")
+    with pytest.raises(AiError, match="認証に失敗") as info:
+        ClaudeModel(client=FakeClient(error=AuthenticationError("bad sk-secret"))).ask(model="m", system="s", prompt="p")
     assert "sk-secret" not in str(info.value)
-    assert "sk-secret" not in repr(ClaudeModel("sk-secret", client=FakeClient()))
+    assert "sk-secret" not in repr(ClaudeModel(client=FakeClient()))
+
+
+# ----------------------------------------------------------------------
+# Gemini の呼び出し（偽のクライアント）
+# ----------------------------------------------------------------------
+class FakeGenai:
+    def __init__(self, result=None, error=None):
+        self.requests, self.result, self.error = [], result, error
+        self.models = SimpleNamespace(generate_content=self._generate)
+
+    def _generate(self, **request):
+        self.requests.append(request)
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def gemini_result(text="{}", finish="STOP", block=None):
+    return SimpleNamespace(
+        text=text,
+        prompt_feedback=SimpleNamespace(block_reason=block) if block else None,
+        candidates=[SimpleNamespace(finish_reason=SimpleNamespace(name=finish))],
+        usage_metadata=SimpleNamespace(prompt_token_count=100, cached_content_token_count=40,
+                                       candidates_token_count=20, thoughts_token_count=30),
+    )
+
+
+def test_gemini_requests_json_and_thinking_level_and_counts_thoughts_as_output():
+    client = FakeGenai(gemini_result('{"action": "hold"}'))
+    reply = GeminiModel(client=client).ask(model="gemini-3.8-flash", system="前提", prompt="質問",
+                                           schema=DECISION_SCHEMA, effort="high")
+    config = client.requests[0]["config"]
+    assert config["response_mime_type"] == "application/json" and config["response_json_schema"] is DECISION_SCHEMA
+    assert config["thinking_config"] == {"thinking_level": "HIGH"} and config["system_instruction"] == "前提"
+    assert reply.data == {"action": "hold"}
+    assert reply.usage == {"input_tokens": 60, "output_tokens": 50, "cache_read_input_tokens": 40,
+                           "cache_creation_input_tokens": 0}
+
+
+@pytest.mark.parametrize("result", [gemini_result(block=SimpleNamespace(name="SAFETY")), gemini_result(finish="SAFETY")])
+def test_gemini_safety_blocks_are_refusals(result):
+    with pytest.raises(RefusalError):
+        GeminiModel(client=FakeGenai(result)).ask(model="g", system="s", prompt="p")
+
+
+def test_gemini_errors_are_explained_by_status_code():
+    class APIError(Exception):
+        code = 404
+
+    with pytest.raises(AiError, match="Model Garden"):
+        GeminiModel(client=FakeGenai(error=APIError())).ask(model="g", system="s", prompt="p")

@@ -29,7 +29,7 @@ import numpy as np
 
 from ...core.contracts import Order, Side
 from ...core.gates import Mode
-from .models import DEFAULT_MODEL, ModelSettings, cost_usd
+from .models import DEFAULT_MODEL, ModelSettings, cost_usd, split
 from .ports import LanguageModel, ModelReply, UsageLog
 
 #: 既定のモデル（互換のため残す。実際に使うモデルは ModelSettings で決まる）
@@ -56,6 +56,10 @@ EFFORT = {"explain": "medium", "report": "medium", "ideas": "high", "decide": "h
 
 class AiError(RuntimeError):
     """AI を呼べない、または答えが使えない。"""
+
+
+class RefusalError(AiError):
+    """安全上の理由で、モデルが答えを控えた。切り替えの順番があれば、次のモデルで試す。"""
 
 
 # ----------------------------------------------------------------------
@@ -282,39 +286,60 @@ class AiAssistant:
                 f"今月の AI の費用が上限（${self.budget.monthly_usd:.2f}）に達しています（${spent:.2f}）。"
                 "上限は AI_MONTHLY_BUDGET_USD で変えられます"
             )
-        model_id = self.model_for(role)
+        attempts = self.settings.load().attempts(role)
+        refused: list[str] = []
+        for key in attempts:
+            reply = self._attempt(role, key, prompt, schema)
+            if isinstance(reply, RefusalError):
+                refused.append(key)  # 断られた記録は _attempt が残している。次のモデルで試す
+                continue
+            return reply
+        raise RefusalError(
+            "AI が答えを控えました。試したモデル: " + " → ".join(refused) + "。質問の書き方を変えて試してください"
+        )
+
+    def _attempt(self, role: str, key: str, prompt: str, schema: dict | None) -> ModelReply | RefusalError:
+        """1つのモデルで試す。断られたら RefusalError を返し（投げない）、次のモデルに回す。"""
         call_id = uuid.uuid4().hex[:12]
         record: dict[str, Any] = {
             "kind": "call",
             "call_id": call_id,
             "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "role": role,
-            "requested_model": model_id,
+            "model": key,
         }
         started = time.monotonic()
         try:
-            reply = self.model.ask(model=model_id, system=SYSTEM, prompt=prompt, schema=schema, effort=EFFORT[role])
+            reply = self.model.ask(model=key, system=SYSTEM, prompt=prompt, schema=schema, effort=EFFORT[role])
+        except RefusalError as exc:
+            self.usage.append({**record, "ok": False, "error": str(exc)[:200],
+                               "latency_ms": int((time.monotonic() - started) * 1000), "cost_usd": 0.0})
+            return exc
         except AiError as exc:
-            # 失敗も記録する（モデルごとの失敗率・断られた率の集計に使う）。費用は分からないので0
-            self.usage.append({**record, "model": model_id, "ok": False, "error": str(exc)[:200],
+            # 失敗も記録する（モデルごとの失敗率の集計に使う）。費用は分からないので0
+            self.usage.append({**record, "ok": False, "error": str(exc)[:200],
                                "latency_ms": int((time.monotonic() - started) * 1000), "cost_usd": 0.0})
             raise
         latency = int((time.monotonic() - started) * 1000)
         schema_ok = schema is None or reply.data is not None
+        provider, model_id = split(key)
+        served = reply.served_model or model_id
+        # サーバー側の切り替えが起きたら、実際に答えたモデルの料金で数える
+        price_key = key if served == model_id else f"{provider}:{served}"
         self.usage.append({
             **record,
-            "model": reply.model,
+            "served_model": served,
             "ok": schema_ok,
             "error": "" if schema_ok else "決まった形で返らなかった",
             "latency_ms": latency,
             "usage": reply.usage,
-            "cost_usd": round(cost_usd(reply.usage, reply.model), 6),
+            "cost_usd": round(cost_usd(reply.usage, price_key), 6),
             # D の判断は、あとで戦績と結び付けるために中身も残す
             "decision": reply.data if role == "decide" else None,
         })
         if not schema_ok:
             raise AiError("AI の答えが決まった形になっていませんでした。もう一度試してください")
-        return replace(reply, call_id=call_id, latency_ms=latency)
+        return replace(reply, model=key, call_id=call_id, latency_ms=latency)
 
     def rate(self, call_id: str, score: int, note: str = "") -> None:
         """答えの良し悪しを記録する（1〜5）。モデルごとの評価の集計に使う。"""
