@@ -1,0 +1,17 @@
+# Cloud Build に送らないもの（.dockerignore と同じ考え方）。
+# 秘密情報・相場データ・台帳は送らない
+.env
+.env.*
+!.env.example
+data/
+state/
+*.db
+infra/.terraform/
+infra/*.tfstate*
+infra/terraform.tfvars
+.git/
+.venv/
+**/__pycache__/
+.pytest_cache/
+*.egg-info/
+.claude/

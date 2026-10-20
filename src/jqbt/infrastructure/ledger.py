@@ -10,11 +10,15 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 STATE_DIR = Path(__file__).resolve().parents[3] / "state"
+#: 台帳の置き場所。Cloud Run では、Cloud Storage を直接つないだ state/ には置けない
+#: （SQLite に要るファイルのロックが無い）ので、手元のディスクに置いて Litestream で複製する
+LEDGER_DIR = Path(os.environ.get("JQBT_LEDGER_DIR") or STATE_DIR)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -31,7 +35,7 @@ CREATE TABLE IF NOT EXISTS equity (date TEXT PRIMARY KEY, equity REAL, cash REAL
 
 
 def path_for(profile: str) -> Path:
-    return STATE_DIR / f"ops_{profile}.db"
+    return LEDGER_DIR / f"ops_{profile}.db"
 
 
 def kill_path(profile: str) -> Path:
@@ -47,6 +51,8 @@ class Ledger:
         # 使うのは一人だけで、書き込みは都度コミットするので、これで足りる
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
+        # Cloud Run では Litestream が複製のために一瞬ロックを取るので、すぐに失敗せず待つ
+        self._db.execute("PRAGMA busy_timeout = 5000")
         self._db.executescript(SCHEMA)
 
     def close(self) -> None:

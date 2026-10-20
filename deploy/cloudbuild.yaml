@@ -1,0 +1,8 @@
+# イメージを Cloud Build で作り、Artifact Registry に置く（make image）。
+# 置き場所とサービスアカウントは infra/（OpenTofu）で作ったもの
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "--build-arg", "JQBT_VERSION=${_VERSION}", "-t", "${_IMAGE}:${_TAG}", "."]
+images: ["${_IMAGE}:${_TAG}"]
+options:
+  logging: CLOUD_LOGGING_ONLY

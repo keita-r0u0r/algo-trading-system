@@ -1,6 +1,11 @@
 # 検証・運用の環境をそのまま再現するためのイメージ。
 # 秘密情報（.env）と相場データ・台帳はイメージに入れない（.dockerignore）。
 # データは実行時にフォルダごとつなぐ（Makefile の docker-* を参照）。
+# Cloud Run では deploy/entrypoint.sh から起動する（docs/cloud-run.md）。
+
+# 台帳を Cloud Storage へ複製する道具（Cloud Run で使う）
+FROM litestream/litestream:0.3.13 AS litestream
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -19,9 +24,12 @@ COPY scripts ./scripts
 COPY tests ./tests
 COPY .streamlit ./.streamlit
 COPY Makefile .env.example ./
+COPY deploy ./deploy
+COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 
 # root では動かさない
-RUN useradd --create-home --uid 1000 app && mkdir -p data state && chown -R app:app /app
+RUN useradd --create-home --uid 1000 app && mkdir -p data state /var/ledger \
+    && chown -R app:app /app /var/ledger
 USER app
 
 # 凍結した版を記録するための Git の版（コンテナの中には Git が無いので、作るときに渡す）
