@@ -25,4 +25,7 @@ class JsonlUsageLog:
 
     def spent_since(self, start: str) -> float:
         """``start``（YYYY-MM-DD）以降の費用の合計（米ドル）。"""
-        return float(sum(r.get("cost_usd", 0.0) for r in self.records() if r.get("at", "")[:10] >= start))
+        return float(sum(
+            r.get("cost_usd", 0.0) for r in self.records()
+            if r.get("kind", "call") == "call" and r.get("at", "")[:10] >= start
+        ))

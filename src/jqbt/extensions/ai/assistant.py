@@ -20,22 +20,20 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from dataclasses import dataclass
+import time
+import uuid
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
 
 from ...core.contracts import Order, Side
 from ...core.gates import Mode
+from .models import DEFAULT_MODEL, ModelSettings, cost_usd, split
 from .ports import LanguageModel, ModelReply, UsageLog
 
-#: 使うモデル。料金は 100万トークンあたりの米ドル（2026年10月時点の公表値）
-MODEL = "claude-opus-5-5"
-PRICES = {
-    "claude-opus-5-5": {"input": 4.00, "output": 20.00, "cache_read": 0.20, "cache_write": 5.00},
-}
-#: フォールバック先など、表に無いモデルは高めに見積もる（費用の上限を甘くしないため）
-FALLBACK_PRICE = {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25}
+#: 既定のモデル（互換のため残す。実際に使うモデルは ModelSettings で決まる）
+MODEL = DEFAULT_MODEL
 
 #: どの役割にも共通の前提。毎回同じ文面にして、プロンプトキャッシュが効くようにする
 SYSTEM = """あなたは、個人が使う売買ルールの検証と少額運用のためのシステム「algo-trading-system」に組み込まれたアシスタントです。
@@ -58,6 +56,10 @@ EFFORT = {"explain": "medium", "report": "medium", "ideas": "high", "decide": "h
 
 class AiError(RuntimeError):
     """AI を呼べない、または答えが使えない。"""
+
+
+class RefusalError(AiError):
+    """安全上の理由で、モデルが答えを控えた。切り替えの順番があれば、次のモデルで試す。"""
 
 
 # ----------------------------------------------------------------------
@@ -146,17 +148,6 @@ DECISION_SCHEMA: dict[str, Any] = {
 # ----------------------------------------------------------------------
 # 費用
 # ----------------------------------------------------------------------
-def cost_usd(usage: dict[str, int], model: str = MODEL) -> float:
-    """1回の呼び出しの費用（米ドル）。キャッシュの読み書きも含める。"""
-    per = PRICES.get(model, FALLBACK_PRICE)
-    return (
-        usage.get("input_tokens", 0) * per["input"]
-        + usage.get("output_tokens", 0) * per["output"]
-        + usage.get("cache_read_input_tokens", 0) * per["cache_read"]
-        + usage.get("cache_creation_input_tokens", 0) * per["cache_write"]
-    ) / 1_000_000
-
-
 @dataclass(frozen=True)
 class AiBudget:
     """月の費用の上限（米ドル）。上限に達したら呼ばない。"""
@@ -270,10 +261,20 @@ def shortlist(view: Any, symbols: list[str], budget: float, size: int = 30) -> l
 # 本体
 # ----------------------------------------------------------------------
 class AiAssistant:
-    def __init__(self, model: LanguageModel, usage: UsageLog, budget: AiBudget = AiBudget()) -> None:
+    def __init__(
+        self,
+        model: LanguageModel,
+        usage: UsageLog,
+        budget: AiBudget = AiBudget(),
+        settings: ModelSettings | None = None,
+    ) -> None:
         self.model = model
         self.usage = usage
         self.budget = budget
+        self.settings = settings or ModelSettings()
+
+    def model_for(self, role: str) -> str:
+        return self.settings.load().model_for(role)
 
     def spent_this_month(self, today: dt.date) -> float:
         return self.usage.spent_since(self.budget.month_start(today))
@@ -285,17 +286,76 @@ class AiAssistant:
                 f"今月の AI の費用が上限（${self.budget.monthly_usd:.2f}）に達しています（${spent:.2f}）。"
                 "上限は AI_MONTHLY_BUDGET_USD で変えられます"
             )
-        reply = self.model.ask(system=SYSTEM, prompt=prompt, schema=schema, effort=EFFORT[role])
-        self.usage.append({
+        attempts = self.settings.load().attempts(role)
+        refused: list[str] = []
+        for key in attempts:
+            reply = self._attempt(role, key, prompt, schema)
+            if isinstance(reply, RefusalError):
+                refused.append(key)  # 断られた記録は _attempt が残している。次のモデルで試す
+                continue
+            return reply
+        raise RefusalError(
+            "AI が答えを控えました。試したモデル: " + " → ".join(refused) + "。質問の書き方を変えて試してください"
+        )
+
+    def _attempt(self, role: str, key: str, prompt: str, schema: dict | None) -> ModelReply | RefusalError:
+        """1つのモデルで試す。断られたら RefusalError を返し（投げない）、次のモデルに回す。"""
+        call_id = uuid.uuid4().hex[:12]
+        record: dict[str, Any] = {
+            "kind": "call",
+            "call_id": call_id,
             "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "role": role,
-            "model": reply.model,
+            "model": key,
+        }
+        started = time.monotonic()
+        try:
+            reply = self.model.ask(model=key, system=SYSTEM, prompt=prompt, schema=schema, effort=EFFORT[role])
+        except RefusalError as exc:
+            self.usage.append({**record, "ok": False, "error": str(exc)[:200],
+                               "latency_ms": int((time.monotonic() - started) * 1000), "cost_usd": 0.0})
+            return exc
+        except AiError as exc:
+            # 失敗も記録する（モデルごとの失敗率の集計に使う）。費用は分からないので0
+            self.usage.append({**record, "ok": False, "error": str(exc)[:200],
+                               "latency_ms": int((time.monotonic() - started) * 1000), "cost_usd": 0.0})
+            raise
+        latency = int((time.monotonic() - started) * 1000)
+        schema_ok = schema is None or reply.data is not None
+        provider, model_id = split(key)
+        served = reply.served_model or model_id
+        # サーバー側の切り替えが起きたら、実際に答えたモデルの料金で数える
+        price_key = key if served == model_id else f"{provider}:{served}"
+        self.usage.append({
+            **record,
+            "served_model": served,
+            "ok": schema_ok,
+            "error": "" if schema_ok else "決まった形で返らなかった",
+            "latency_ms": latency,
             "usage": reply.usage,
-            "cost_usd": round(cost_usd(reply.usage, reply.model), 6),
+            "cost_usd": round(cost_usd(reply.usage, price_key), 6),
+            # D の判断は、あとで戦績と結び付けるために中身も残す
+            "decision": reply.data if role == "decide" else None,
         })
-        if schema is not None and reply.data is None:
+        if not schema_ok:
             raise AiError("AI の答えが決まった形になっていませんでした。もう一度試してください")
-        return reply
+        return replace(reply, model=key, call_id=call_id, latency_ms=latency)
+
+    def rate(self, call_id: str, score: int, note: str = "") -> None:
+        """答えの良し悪しを記録する（1〜5）。モデルごとの評価の集計に使う。"""
+        if not call_id or score not in (1, 2, 3, 4, 5):
+            raise AiError("評価は1〜5で付けてください")
+        model = next((r.get("model") for r in self.usage.records() if r.get("call_id") == call_id), None)
+        if model is None:
+            raise AiError("評価する呼び出しが見つかりません")
+        self.usage.append({
+            "kind": "rating",
+            "call_id": call_id,
+            "model": model,
+            "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "score": score,
+            "note": note[:200],
+        })
 
     # A ---------------------------------------------------------------
     def explain(self, question: str, context: dict[str, Any], today: dt.date) -> ModelReply:
