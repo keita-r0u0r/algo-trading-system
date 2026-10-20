@@ -207,3 +207,24 @@ def test_per_bar_spread_is_used_for_fills():
     trade = result.trades[0]
     assert trade.entry_price == pytest.approx(150.01)  # 足1の始値、スプレッド 2.0pips の半分
     assert trade.exit_price == pytest.approx(149.999)  # 足2の始値、スプレッド 0.2pips の半分
+
+
+def test_swap_is_paid_per_calendar_day_when_held_overnight():
+    """金曜の営業日から月曜の営業日へ持ち越すと、3日分のスワップ。"""
+    data = bars([(150, 150, 150, 150)] * 4, start="2025-01-10 23:58")
+    data["session"] = [pd.Timestamp("2025-01-10").date()] * 2 + [pd.Timestamp("2025-01-13").date()] * 2
+    result = run_fx(data, Script({0: FxSignal(1)}), config(swap_long=0.01))
+    # 1,000通貨 × 0.01円 × 3日 = 30円。期間の終わりに手仕舞う
+    assert result.trades[0].exit_reason == "期間の終わり"
+    assert result.summary["final"] == pytest.approx(100_000 + 30)
+
+
+def test_gotobi_days_move_weekends_to_friday():
+    import datetime as dt
+
+    from jqbt.strategies.fx import gotobi_days
+
+    days = gotobi_days(2026, 10)
+    assert dt.date(2026, 10, 9) in days  # 10日は土曜 → 9日（金）
+    assert dt.date(2026, 10, 23) in days  # 25日は日曜 → 23日（金）
+    assert dt.date(2026, 2, 27) in gotobi_days(2026, 2)  # 2月は月末（28日は土曜 → 27日）

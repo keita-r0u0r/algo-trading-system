@@ -5,11 +5,14 @@
   1. 前の足の終値で出た判断を、この足の **始値** で執行する
   2. 損切り・利確に届いたか（両方なら損切りが先、と見なす）
   3. ロスカットの価格に届いたか。届いたら **検証はそこで終わり**
-  4. その日の最後の足なら、建玉を手仕舞う（日をまたがない）
+  4. その日の最後の足なら、建玉を手仕舞う（日をまたがない）。データの最後の足でも手仕舞う
   5. 終値で評価額を記録する
   6. 戦略が終値で判断する（次の足の始値で執行）
 
 戦略に渡すのは、その足までの配列（``FxView``）だけ。未来の足には触れられない。
+
+日をまたいで持つときは、営業日が替わるたびにスワップ（金利差）を受け取る・払う。
+暦の日数で数える（金曜から月曜は3日分）。
 """
 
 from __future__ import annotations
@@ -70,6 +73,9 @@ class FxConfig:
     flat_at_day_end: bool = True
     #: スプレッドがこれ（pips）を超える足では、新規の建玉を作らない（朝の切り替えなど）。None なら制限なし
     max_entry_spread_pips: float | None = None
+    #: スワップ（円/通貨/日）。受け取りは正、支払いは負。日をまたいで持つときだけ効く
+    swap_long: float = 0.0
+    swap_short: float = 0.0
 
 
 @dataclass
@@ -134,6 +140,11 @@ def run_fx(bars: pd.DataFrame, strategy: FxStrategy, config: FxConfig = FxConfig
         t = times[i]
         if spread is not None:
             costs = replace(base_costs, spread_pips=spread[i])
+        # 0. 営業日が替わったら、持ち越した建玉のスワップ
+        if i > 0 and position.is_open and day_of[i] != day_of[i - 1]:
+            days = max((pd.Timestamp(day_of[i]) - pd.Timestamp(day_of[i - 1])).days, 1)
+            rate = config.swap_long if position.is_long else config.swap_short
+            cash += abs(position.units) * rate * days
 
         # 1. 前の足の判断を、この足の始値で執行
         if pending is not None:
@@ -181,6 +192,8 @@ def run_fx(bars: pd.DataFrame, strategy: FxStrategy, config: FxConfig = FxConfig
         # 4. 日の終わりに手仕舞う
         if config.flat_at_day_end and left[i] == 0 and position.is_open:
             exit_at(costs.fill(c[i], not position.is_long, inst), t, "日の終わり", c[i])
+        elif i == n - 1 and position.is_open:
+            exit_at(costs.fill(c[i], not position.is_long, inst), t, "期間の終わり", c[i])
 
         # 5. 評価額
         equity[i] = cash + unrealized(position, c[i], costs, inst)
