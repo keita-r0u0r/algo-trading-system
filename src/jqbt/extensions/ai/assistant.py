@@ -51,7 +51,7 @@ SYSTEM = """あなたは、個人が使う売買ルールの検証と少額運�
 - 一見良い成績には、まずバグ・先読み・偶然・コスト前提を疑う"""
 
 #: 役割ごとの考える深さ（effort）。説明と要約は medium、案と判断は high
-EFFORT = {"explain": "medium", "report": "medium", "ideas": "high", "decide": "high"}
+EFFORT = {"explain": "medium", "report": "medium", "ideas": "high", "decide": "high", "fx": "medium"}
 
 
 class AiError(RuntimeError):
@@ -141,6 +141,25 @@ DECISION_SCHEMA: dict[str, Any] = {
         "risks": {"type": "string"},
     },
     "required": ["action", "symbol", "quantity", "confidence", "reasoning", "risks"],
+    "additionalProperties": False,
+}
+
+#: E: FX のペーパー運用の判断。決まった枠の中で、通貨ペア・向き・リスク・損切り・利確を自由に決める
+FX_DECISION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["hold", "open_long", "open_short", "close"]},
+        "symbol": {"type": "string"},
+        "risk_fraction": {"type": "number"},
+        "stop_pips": {"type": "number"},
+        "take_pips": {"type": "number"},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "horizon": {"type": "string"},
+        "reasoning": {"type": "string"},
+        "risks": {"type": "string"},
+    },
+    "required": ["action", "symbol", "risk_fraction", "stop_pips", "take_pips", "confidence", "horizon",
+                 "reasoning", "risks"],
     "additionalProperties": False,
 }
 
@@ -335,7 +354,7 @@ class AiAssistant:
             "usage": reply.usage,
             "cost_usd": round(cost_usd(reply.usage, price_key), 6),
             # D の判断は、あとで戦績と結び付けるために中身も残す
-            "decision": reply.data if role == "decide" else None,
+            "decision": reply.data if role in ("decide", "fx") else None,
         })
         if not schema_ok:
             raise AiError("AI の答えが決まった形になっていませんでした。もう一度試してください")
@@ -389,6 +408,25 @@ class AiAssistant:
             f"<research>\n{to_context(context)}\n</research>"
         )
         return self._ask("ideas", prompt, IDEAS_SCHEMA, today)
+
+    # E ---------------------------------------------------------------
+    def fx_decide(self, context: dict[str, Any], today: dt.date) -> ModelReply:
+        """FX のペーパー運用で、次の1時間の判断を1つ出す。枠の確認は呼び出し側（core.fx.frame）で行う。"""
+        prompt = (
+            "FX のペーパー運用（仮想の約定。実際の注文は出ない）で、今の時点の判断を1つだけ出してください。\n"
+            "- 守る枠は <frame> のとおり。枠の外の判断は実行されず、記録だけ残る\n"
+            "- open_long / open_short は新規。symbol は frame.symbols から。stop_pips は必須で範囲内\n"
+            "- risk_fraction は「損切りに掛かったとき資金の何割を失ってよいか」（例 0.01 = 1%）。上限は frame.max_risk_per_trade\n"
+            "- take_pips は利確の幅。付けないなら 0\n"
+            "- 建玉を持っている間は、close か hold だけ。向きを変えたいなら、まず close\n"
+            "- コストは往復で約1 pip（スプレッド・手数料・ずれ）。それより十分大きい値幅を見込めないなら hold\n"
+            "- 根拠が弱いときは hold を選ぶ。hold のとき symbol は空文字、数値は 0\n"
+            "- あなたの学習データに含まれる期間の値動きの知識を、判断に使わないこと。渡したデータだけで判断する\n\n"
+            f"<frame>\n{to_context(context.get('frame', {}))}\n</frame>\n\n"
+            f"<account>\n{to_context(context.get('account', {}))}\n</account>\n\n"
+            f"<market>\n{to_context(context.get('market', {}))}\n</market>"
+        )
+        return self._ask("fx", prompt, FX_DECISION_SCHEMA, today)
 
     # D ---------------------------------------------------------------
     def decide(

@@ -19,6 +19,7 @@
 | 操作盤（GUI） | 上の運用を画面で。手元（このMacからだけ）か、Cloud Run（自分のアカウントだけ） | `make gui` / [docs/cloud-run.md](docs/cloud-run.md) |
 | 秘密情報 | APIキーは GCP Secret Manager から読む（手元の開発では `.env` も可） | [docs/secrets.md](docs/secrets.md) |
 | 拡張パーツ | 後から付け外しできる機能。いまは AI（Claude / Gemini、Vertex AI 経由）がある | [docs/extensions.md](docs/extensions.md) / [docs/ai.md](docs/ai.md) |
+| FX のペーパー運用 | AI・ルール・基準を、その時点の本物の値段で1時間ごとに判断させて記録する（仮想の約定） | `make paper` / [docs/fx-paper.md](docs/fx-paper.md) |
 
 ---
 
@@ -64,6 +65,7 @@
 - リスクの度合い（小・中・最大）を変えても、**増えた月の割合はほぼ同じ**（判断が同じなので当然）。
   変わるのは振れ幅だけで、最大では最悪の月が −11〜−29%。1日 −10% で止める決まりが先に効き、ロスカットは0回。
   資金1万円・最小100通貨では、「小」は損切りの幅が広いルールで数量が足りず、ほとんど入れない（`--risk all`）
+- 日米の2年金利の差の向き（20営業日）に乗るルールも、月 +0.03%、t = +0.19 で偶然と区別がつかない
 
 ### FX（分足、ダミーデータ）
 
@@ -339,8 +341,8 @@ src/jqbt/
    ├─ fx.py                  FX の候補（EMA交差・ボリンジャー逆張り・レンジブレイク・ランダム）
    └─ __init__.py            REGISTRY（ファクトリとパラメータ格子）
 
-scripts/  fetch.py  run.py  validate.py  research.py  ops.py  gui.py  fx_research.py  fx_real.py  gmo_check.py
-docs/     operations.md（運用の手順）  secrets.md（秘密情報）  extensions.md（拡張パーツ）  ai.md（AI）  cloud-run.md（Cloud Run）
+scripts/  fetch.py  run.py  validate.py  research.py  ops.py  gui.py  fx_research.py  fx_real.py  fx_paper.py  gmo_check.py
+docs/     operations.md（運用の手順）  secrets.md（秘密情報）  extensions.md（拡張パーツ）  ai.md（AI）  cloud-run.md（Cloud Run）  fx-paper.md（FX のペーパー運用）
 infra/    GCP の構成（OpenTofu）
 deploy/   Cloud Run での起動・台帳の複製・イメージの作り方
 ```

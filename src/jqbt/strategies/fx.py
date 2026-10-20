@@ -233,3 +233,44 @@ class NoTradeFx:
 
     def decide(self, view: FxView, position: FxPosition) -> FxSignal | None:
         return None
+
+
+class RateMomentum:
+    """日米の金利差（米国2年 − 日本2年）が、直近20営業日で広がっていればドル買い、縮んでいればドル売り。
+
+    金利差が広がるとドルを持つ利点が増え、ドル高になりやすい、という考え方。毎朝9時に判断し、日をまたいで持つ。
+    変化が ±0.10%（10bp）以内なら持たない。損切り100 pips。
+    金利は「その日より前に分かっていた値」だけを使う（``rates.known_before`` と同じ考え方）。
+    """
+
+    def __init__(self, spread, lookback: int = 20, band: float = 0.10, stop_pips: float = 100) -> None:
+        import numpy as np
+
+        self.lookback, self.band, self.stop_pips = lookback, band, stop_pips
+        self.name = f"rate_momentum_{lookback}"
+        self._dates = [d.date() for d in spread.index]
+        self._values = np.asarray(spread.to_numpy(dtype=float))
+        self._decided_on = None
+
+    def target(self, day) -> int:
+        """``day`` の朝に望む向き（+1 / 0 / −1）。"""
+        import bisect
+
+        # day より前に分かっていた値だけ（同じ日付の値は使わない）
+        k = bisect.bisect_left(self._dates, day)
+        if k <= self.lookback:
+            return 0
+        change = self._values[k - 1] - self._values[k - 1 - self.lookback]
+        return 1 if change > self.band else -1 if change < -self.band else 0
+
+    def decide(self, view: FxView, position: FxPosition) -> FxSignal | None:
+        t = view.time
+        if t.hour != 9 or t.minute != 0 or self._decided_on == t.date():
+            return None
+        self._decided_on = t.date()
+        want, held = self.target(t.date()), _direction(position)
+        if want == held:
+            return None
+        if want == 0:
+            return FxSignal(0, reason="金利差の変化が小さい")
+        return FxSignal(want, self.stop_pips, None, "金利差が拡大" if want > 0 else "金利差が縮小")

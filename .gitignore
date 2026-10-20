@@ -6,6 +6,7 @@ __pycache__/
 data/raw/
 data/curated/
 data/fx/
+data/rates/
 .pytest_cache/
 .ipynb_checkpoints/
 notebooks/*.ipynb

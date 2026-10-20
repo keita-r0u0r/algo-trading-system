@@ -141,7 +141,7 @@ profile = st.sidebar.radio(
     "プロファイル", ["paper", "live"],
     format_func=lambda p: "ペーパー（仮想の約定）" if p == "paper" else "実運用（実際の約定を記録）",
 )
-PAGES = ["今日", "売買候補と約定", "設定", "履歴", "FX検証（ダミーデータ）"]
+PAGES = ["今日", "売買候補と約定", "設定", "履歴", "FX ペーパー", "FX検証（ダミーデータ）"]
 #: 拡張パーツが足す画面（タイトル → 描画の関数）
 EXTENSION_PAGES = {page.title: page.render for ext in extensions().extensions for page in ext.gui_pages()}
 # タブは描き直すと先頭に戻るので、選んだ画面が保たれるサイドバーで切り替える
@@ -411,6 +411,55 @@ if page == "履歴":
             st.caption("まだありません")
         st.subheader("設定変更の履歴（監査ログ）")
         st.dataframe(pd.DataFrame(vm.audit_rows(ops.ledger.audit_log(200))), hide_index=True, width="stretch")
+
+# ----------------------------------------------------------------------
+# FX ペーパー（前向きの仮想運用。scripts/fx_paper.py が1時間に1回進める）
+# ----------------------------------------------------------------------
+if page == "FX ペーパー":
+    from jqbt.infrastructure import fx_paper_log
+
+    st.caption("AI・ルール・基準の口座を、同じ時刻・同じ値段で並べた仮想の運用です。注文は出していません。")
+    events = fx_paper_log.load()
+    if not events:
+        st.info("まだ記録がありません。scripts/fx_paper.py を実行すると始まります（Cloud Run では1時間に1回）")
+    else:
+        snapshots = fx_paper_log.latest_snapshots(events)
+        rows = []
+        for name, state in snapshots.items():
+            closes = [e for e in events if e.get("kind") == "close" and e.get("account") == name]
+            position = state.get("position")
+            equity = state.get("equity") or state["cash"]
+            rows.append({
+                "口座": name,
+                "評価額": round(equity),
+                "損益": f"{equity / state['initial'] - 1:+.2%}",
+                "建玉": f"{position['symbol']} {position['units']:+,.0f}" if position else "—",
+                "閉じた取引": len(closes),
+                "勝ち": sum(e["pnl"] > 0 for e in closes),
+                "停止": "ロスカット" if state.get("stopped") else "",
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        curve = pd.DataFrame(
+            [{"時刻": pd.Timestamp(e["at"]), "口座": e["account"], "評価額": e["state"].get("equity") or e["state"]["cash"]}
+             for e in events if e.get("kind") == "snapshot"]
+        )
+        if len(curve) > 1:
+            chart = (
+                alt.Chart(curve).mark_line()
+                .encode(x="時刻:T", y=alt.Y("評価額:Q", scale=alt.Scale(zero=False)), color="口座:N")
+                .properties(height=280)
+            )
+            st.altair_chart(chart, width="stretch")
+        st.subheader("最近の判断と約定")
+        recent = [e for e in events if e.get("kind") in ("decision", "open", "close", "halted", "stopped")][-50:]
+        st.dataframe(pd.DataFrame([{
+            "時刻": e.get("at"), "口座": e.get("account"), "種類": e.get("kind"),
+            "中身": (e.get("decision") or {}).get("action") if e.get("kind") == "decision"
+            else f"{e.get('symbol', '')} {e.get('units', 0):+,.0f}",
+            "結果・理由": ("通過" if e.get("approved") else e.get("rejected") or e.get("error") or "見送り")
+            if e.get("kind") == "decision" else (f"{e['pnl']:+,.0f}円 " if "pnl" in e else "") + str(e.get("reason", "")),
+            "AI": e.get("model", ""),
+        } for e in reversed(recent)]), hide_index=True, width="stretch")
 
 # ----------------------------------------------------------------------
 # FX検証（ダミーデータ）

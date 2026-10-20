@@ -1,7 +1,7 @@
 # 仮想環境（.venv）があればその Python を使う
 PY := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
-.PHONY: install test fetch compare run holdout walkforward gui docker-build docker-test docker-gui infra-init infra-plan infra-apply image deploy cloud-seed
+.PHONY: install test fetch compare run holdout walkforward gui docker-build docker-test docker-gui infra-init infra-plan infra-apply image deploy cloud-seed paper
 
 install:
 	$(PY) -m pip install -e ".[dev]"
@@ -30,6 +30,10 @@ walkforward:
 # 運用の操作盤（http://127.0.0.1:8501）
 gui:
 	$(PY) scripts/gui.py
+
+# FX のペーパー運用を1回進める（Cloud Run では1時間に1回、自動。注文は出さない）
+paper:
+	$(PY) scripts/fx_paper.py
 
 # --- Docker ---------------------------------------------------------------
 # 相場データと台帳はイメージに入れず、このフォルダの data/ と state/ をつなぐ。
