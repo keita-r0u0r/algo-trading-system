@@ -195,3 +195,39 @@ class FxSignal:
     stop_pips: float | None = None
     take_pips: float | None = None
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class RiskProfile:
+    """リスクの度合い。数量を「1回の損切りで資金の何%まで失ってよいか」から逆算する。
+
+    リスクを上げても、勝てるかどうかは変わらない。変わるのは振れ幅（と、コストの額）だけ。
+    """
+
+    name: str
+    #: 1回の損切りで失ってよい資金の割合
+    risk_per_trade: float
+    #: レバレッジの上限（建玉の金額 ÷ 資金）
+    max_leverage: float
+    #: 営業日の初めから資金がこの割合だけ減ったら、その日は手仕舞って新規をやめる
+    daily_loss_limit: float
+    #: 損切りの無い判断の数量は、この幅（pips）で損切りするものとして計算する
+    assumed_stop_pips: float = 100.0
+
+
+RISK_PROFILES = {
+    "small": RiskProfile("small", risk_per_trade=0.005, max_leverage=2, daily_loss_limit=0.02),
+    "medium": RiskProfile("medium", risk_per_trade=0.01, max_leverage=5, daily_loss_limit=0.04),
+    "max": RiskProfile("max", risk_per_trade=0.025, max_leverage=20, daily_loss_limit=0.10),
+}
+
+
+def size_units(risk: RiskProfile, equity: float, price: float, stop_pips: float | None, inst: FxInstrument) -> float:
+    """リスクの度合いから数量を決める（1通貨単位で切り捨て）。最小の注文数量に届かなければ 0（入らない）。"""
+    if equity <= 0 or price <= 0:
+        return 0.0
+    distance = (stop_pips or risk.assumed_stop_pips) * inst.pip
+    by_risk = equity * risk.risk_per_trade / distance
+    by_leverage = equity * risk.max_leverage / price
+    units = float(int(min(by_risk, by_leverage)))
+    return units if units >= inst.min_units else 0.0
