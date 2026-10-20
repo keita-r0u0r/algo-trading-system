@@ -425,6 +425,21 @@ def test_invalid_json_gives_no_data():
     assert reply.data is None
 
 
+def test_vertex_quota_and_data_sharing_errors_are_explained():
+    class RateLimitError(Exception):
+        pass
+
+    class PermissionDeniedError(Exception):
+        pass
+
+    quota = RateLimitError("Quota exceeded for aiplatform.googleapis.com/... base model: anthropic-claude-opus")
+    with pytest.raises(AiError, match="クォータ"):
+        ClaudeModel(client=FakeClient(error=quota)).ask(model="m", system="s", prompt="p")
+    sharing = PermissionDeniedError("Access to this model requires data sharing to be enabled for publisher 'anthropic'")
+    with pytest.raises(AiError, match="データ共有"):
+        ClaudeModel(client=FakeClient(error=sharing)).ask(model="m", system="s", prompt="p")
+
+
 def test_api_errors_become_plain_messages_without_the_key():
     class AuthenticationError(Exception):
         pass

@@ -44,7 +44,7 @@ AI を呼ぶのは、画面でボタンを押したときだけです。画面�
 | `vertex:gemini-3.1-pro-preview` | 2.00 | 12.00 | プレビュー |
 | `anthropic:claude-*` | 同上 | 同上 | Anthropic 直接（Haiku 以外はサーバー側の切り替えあり） |
 
-- **Gemini のモデルID は、料金表の表示名からの推測です。** Model Garden で正しい ID を確かめ、違っていれば画面の「モデルを一覧に足す」で直してください
+- Gemini の3つのモデルID は、実際の呼び出しで確認済みです（2026-10-20）
 - Vertex AI でリージョンを指定すると（`AI_VERTEX_REGION`）、Gemini は約1割高くなります。既定は `global`
 - 一覧に無いモデルも使えます。料金が分からないので **一覧で最も高い料金で見積もり** ます
 
@@ -75,6 +75,17 @@ AI の画面の「モデルの比較」で、モデルごとに次を集計し�
 - **月の上限**（既定 $5、`AI_MONTHLY_BUDGET_USD`）に達したら AI を呼びません
 - 考える深さは役割ごとに決めています（A・B は medium、C・D は high）。Gemini では thinking_level に対応させます
 - 思考（thinking）のトークンも出力として課金されます
+
+## Vertex AI で Claude が使えないとき
+
+新しいプロジェクトでは、Vertex AI の Claude がすぐには使えないことがあります（Gemini はすぐ使えます）。
+
+| 表示 | 原因 | 対処 |
+|---|---|---|
+| 使用量の枠（クォータ）が足りません | Claude のモデルの枠が0 | コンソールの「IAM と管理」→「割り当て」で、`global_online_prediction_requests_per_base_model`（例: `anthropic-claude-opus`）の引き上げを申請する |
+| データ共有の設定を有効にしないと使えません | Claude Fable 5.1 など | Model Garden の案内に従って、Anthropic 向けのデータ共有を設定する |
+
+申請が通るまでは、既定のモデルを Gemini にしておくか、断られたときの順番に Gemini を入れておくと使えます。
 
 ## 設定（Vertex AI、既定）
 

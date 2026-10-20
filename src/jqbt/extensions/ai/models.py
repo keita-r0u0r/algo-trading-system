@@ -66,17 +66,18 @@ def _claude(provider: str, id_: str, label: str, inp: float, out: float, cache: 
 
 DEFAULTS: tuple[ModelSpec, ...] = (
     # --- Vertex AI（Claude）。サーバー側の切り替えは無い（自前の切り替えの順番を使う） ---
-    _claude("vertex", "claude-fable-5-1", "Claude Fable 5.1", 10.00, 50.00, 0.25, False, "最も高性能。最も高い"),
+    _claude("vertex", "claude-fable-5-1", "Claude Fable 5.1", 10.00, 50.00, 0.25, False,
+            "最も高性能。最も高い。Anthropic 向けのデータ共有の設定が必要"),
     _claude("vertex", "claude-opus-5-5", "Claude Opus 5.5", 4.00, 20.00, 0.20, False, "既定。性能と費用の釣り合い"),
     _claude("vertex", "claude-sonnet-5-5", "Claude Sonnet 5.5", 2.00, 10.00, 0.10, False, "速く、安い"),
     _claude("vertex", "claude-haiku-5-5", "Claude Haiku 5.5", 0.10, 0.50, 0.01, False, "最も安い（入力10万トークンまでの料金）"),
-    # --- Vertex AI（Gemini）。モデルIDは料金表の表示名からの推測。Model Garden で要確認 ---
+    # --- Vertex AI（Gemini）。モデルIDは 2026-10-20 に実際の呼び出しで確認済み ---
     ModelSpec("vertex", "gemini-4-argon", "Gemini 4 Argon", "gemini", 4.00, 20.00, 0.20, False,
-              "12/1以降の料金で見積もり（それまでは半額）。モデルIDは要確認"),
+              "12/1以降の料金で見積もり（それまでは半額）"),
     ModelSpec("vertex", "gemini-3.8-flash", "Gemini 3.8 Flash", "gemini", 1.50, 7.50, 0.15, False,
-              "2027年以降の料金で見積もり（それまでは半額）。モデルIDは要確認"),
+              "2027年以降の料金で見積もり（それまでは半額）"),
     ModelSpec("vertex", "gemini-3.1-pro-preview", "Gemini 3.1 Pro（プレビュー）", "gemini", 2.00, 12.00, 0.20, False,
-              "入力20万トークンまでの料金。モデルIDは要確認"),
+              "入力20万トークンまでの料金"),
     # --- Anthropic 直接。断られたときのサーバー側の切り替えがある（Haiku を除く） ---
     _claude("anthropic", "claude-fable-5-1", "Claude Fable 5.1", 10.00, 50.00, 0.25, True, ""),
     _claude("anthropic", "claude-opus-5-5", "Claude Opus 5.5", 4.00, 20.00, 0.20, True, ""),

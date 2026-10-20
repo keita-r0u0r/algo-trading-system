@@ -96,6 +96,18 @@ class ClaudeModel:
 def _describe(exc: Exception) -> str:
     """API の例外を、利用者向けの説明にする。キーなどの値は含めない。"""
     name = type(exc).__name__
+    detail = str(exc)
+    # Vertex AI では、使い始めのモデルの枠（クォータ）が0のことがある。使いすぎではない
+    if "Quota exceeded" in detail:
+        return (
+            "Vertex AI のこのモデルの使用量の枠（クォータ）が足りません（新しいプロジェクトでは0のことがあります）。"
+            "Google Cloud のコンソールの「割り当て」で引き上げを申請してください"
+        )
+    if "data sharing" in detail:
+        return (
+            "このモデルは、Vertex AI で Anthropic 向けのデータ共有の設定を有効にしないと使えません"
+            "（Claude Fable 5.1 など）。Model Garden の案内に従って設定してください"
+        )
     messages = {
         "AuthenticationError": "認証に失敗しました（APIキー、または gcloud のログインを確認）",
         "PermissionDeniedError": "権限がありません（Vertex AI では、Model Garden でこのモデルを有効にしているかを確認）",
