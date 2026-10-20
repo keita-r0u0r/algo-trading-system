@@ -1,7 +1,7 @@
 # 仮想環境（.venv）があればその Python を使う
 PY := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
-.PHONY: install test fetch compare run holdout walkforward gui docker-build docker-test docker-gui infra-init infra-plan infra-apply image deploy cloud-seed
+.PHONY: install test fetch compare run holdout walkforward gui docker-build docker-test docker-gui infra-init infra-plan infra-apply image deploy cloud-seed paper
 
 install:
 	$(PY) -m pip install -e ".[dev]"
@@ -30,6 +30,10 @@ walkforward:
 # 運用の操作盤（http://127.0.0.1:8501）
 gui:
 	$(PY) scripts/gui.py
+
+# FX のペーパー運用を1回進める（Cloud Run では1時間に1回、自動。注文は出さない）
+paper:
+	$(PY) scripts/fx_paper.py
 
 # --- Docker ---------------------------------------------------------------
 # 相場データと台帳はイメージに入れず、このフォルダの data/ と state/ をつなぐ。
@@ -61,7 +65,10 @@ infra-init:
 	$(TOFU) init -backend-config=bucket=$(PROJECT)-tfstate
 
 # 動いている版（前回の deploy）を引き継ぐ。渡さないと Cloud Run を消す計画になる
-CURRENT = -var image_tag="$$($(TOFU) output -raw image_tag 2>/dev/null)" -var app_version="$$($(TOFU) output -raw app_version 2>/dev/null || echo unknown)"
+# 出力がまだ無いとき、tofu output は警告を標準出力に出すので、JSON で読む。
+# 版の形（英数字・記号のみ、空白なし）でなければ、無いものとして扱う
+OUTPUT = $(TOFU) output -json | python3 -c 'import json,re,sys; v=str(json.load(sys.stdin).get(sys.argv[1],{}).get("value","")); print(v if re.fullmatch(r"[\w.+-]+",v) else sys.argv[2])'
+CURRENT = -var image_tag="$$($(OUTPUT) image_tag '')" -var app_version="$$($(OUTPUT) app_version unknown)"
 
 infra-plan:
 	$(TOFU) plan $(CURRENT)

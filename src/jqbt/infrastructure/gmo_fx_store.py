@@ -116,7 +116,11 @@ def load(symbol: str, start: dt.date | None = None, end: dt.date | None = None, 
         frames.append(frame)
     if not frames:
         raise FileNotFoundError(f"{root / symbol} に足がありません。先に取り込んでください")
-    raw = pd.concat(frames)
+    return to_engine(pd.concat(frames), pip)
+
+
+def to_engine(raw: pd.DataFrame, pip: float = 0.01) -> pd.DataFrame:
+    """売値・買値の足（と session の列）を、検証エンジンの形（仲値の OHLC・spread・session）にする。"""
     out = pd.DataFrame(index=raw.index)
     for f in ("open", "high", "low", "close"):
         out[f] = (raw[f"bid_{f}"] + raw[f"ask_{f}"]) / 2

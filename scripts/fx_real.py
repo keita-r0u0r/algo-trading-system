@@ -52,7 +52,9 @@ from jqbt.strategies.fx import (  # noqa: E402
     NoTradeFx,
     RandomFx,
     RangeBreakout,
+    RateMomentum,
 )
+from jqbt.infrastructure import rates  # noqa: E402
 
 #: 試す候補（名前 → (作り方, 日をまたぐか)）。ここに足した数だけ試行回数 N が増える
 CANDIDATE_SETS = {
@@ -174,7 +176,7 @@ def spread_profile(bars: pd.DataFrame) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--symbol", default="USD_JPY")
-    parser.add_argument("--fetch", action="store_true", help="先に足を取り込む（取得済みの日は飛ばす）")
+    parser.add_argument("--fetch", action="store_true", help="先に足と日米の金利を取り込む（取得済みの日は飛ばす）")
     parser.add_argument("--cash", type=float, default=10_000.0)
     parser.add_argument("--units", type=float, default=100)
     parser.add_argument("--slippage", type=float, default=0.1, help="成行の不利なずれ（pips）")
@@ -199,6 +201,12 @@ def main() -> int:
     if args.fetch:
         print(f"{args.symbol} の1分足を取り込みます（{FIRST_DAY} から。取得済みの日は飛ばす）")
         fetch_range(GmoFxClient(), args.symbol, FIRST_DAY, dt.date.today())
+        print("日米の国債利回りを取り込みます（財務省・FRED）")
+        rates.fetch()
+    if args.set == "low_freq":
+        # 金利差のルールは、取り込んだ金利が要る
+        spread = rates.spread()
+        candidates = {**candidates, "rate_momentum_20": (lambda: RateMomentum(spread), True)}
 
     bars = load(args.symbol)
     months = by_month(bars)

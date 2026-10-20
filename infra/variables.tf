@@ -31,3 +31,15 @@ variable "ai_monthly_budget_usd" {
   type        = number
   default     = 5
 }
+
+variable "fx_paper_risk" {
+  description = "FX のペーパー運用のリスクの度合い（small / medium / max）"
+  type        = string
+  default     = "medium"
+}
+
+variable "fx_paper_paused" {
+  description = "true にすると、1時間ごとの実行を止める"
+  type        = bool
+  default     = false
+}

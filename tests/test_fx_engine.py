@@ -263,3 +263,24 @@ def test_no_trade_keeps_cash():
     data = bars([(150, 151, 149, 150)] * 5)
     result = run_fx(data, NoTradeFx(), config())
     assert result.summary["total_return"] == 0 and not result.trades
+
+
+def test_rate_momentum_uses_only_rates_known_before_the_day():
+    from jqbt.strategies.fx import RateMomentum
+
+    dates = pd.bdate_range("2025-01-01", periods=30)
+    spread = pd.Series([1.0] * 25 + [1.5] * 5, index=dates)
+    rule = RateMomentum(spread, lookback=20, band=0.1)
+    day = dates[25].date()
+    assert rule.target(day) == 0  # その日の値（1.5 への上昇）はまだ分からない
+    assert rule.target(dates[26].date()) == 1  # 前の日までに 1.0 → 1.5（+0.5%）
+
+
+def test_wareki_dates():
+    import datetime as dt
+
+    from jqbt.infrastructure.rates import parse_wareki
+
+    assert parse_wareki("R8.9.30") == dt.date(2026, 9, 30)
+    assert parse_wareki("H31.4.30") == dt.date(2019, 4, 30)
+    assert parse_wareki("基準日") is None

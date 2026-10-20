@@ -10,7 +10,7 @@ data "google_project" "this" {}
 
 locals {
   name     = "algo-trading"
-  services = ["run", "artifactregistry", "cloudbuild", "iap", "aiplatform", "secretmanager", "storage"]
+  services = ["run", "artifactregistry", "cloudbuild", "iap", "aiplatform", "secretmanager", "storage", "cloudscheduler"]
   image    = "${var.region}-docker.pkg.dev/${var.project}/${google_artifact_registry_repository.images.repository_id}/gui"
 }
 
@@ -277,4 +277,114 @@ resource "google_iap_web_cloud_run_service_iam_member" "users" {
   cloud_run_service_name = google_cloud_run_v2_service.gui[0].name
   role                   = "roles/iap.httpsResourceAccessor"
   member                 = each.key
+}
+
+# --- FX のペーパー運用（1時間に1回、仮想の約定を進める） ------------------------------
+# 注文は出さない。判断と仮想の約定を state/fx_paper.jsonl に追記するだけ（画面の「FX ペーパー」で見る）
+
+resource "google_cloud_run_v2_job" "fx_paper" {
+  count = var.image_tag == "" ? 0 : 1
+
+  name                = "${local.name}-fx-paper"
+  location            = var.region
+  deletion_protection = false
+
+  template {
+    task_count = 1
+    template {
+      service_account       = google_service_account.gui.email
+      execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
+      timeout               = "600s"
+      # やり直すと同じ1時間に二重に判断するので、やり直さない（次の1時間に任せる）
+      max_retries = 0
+
+      containers {
+        image   = "${local.image}:${var.image_tag}"
+        command = ["python", "scripts/fx_paper.py"]
+
+        resources {
+          limits = {
+            cpu    = "1"
+            memory = "1Gi"
+          }
+        }
+        env {
+          name  = "JQBT_VERSION"
+          value = var.app_version
+        }
+        env {
+          name  = "JQBT_EXTENSIONS"
+          value = "ai"
+        }
+        env {
+          name  = "GCP_PROJECT"
+          value = var.project
+        }
+        env {
+          name  = "AI_VERTEX_REGION"
+          value = "global"
+        }
+        env {
+          name  = "AI_MONTHLY_BUDGET_USD"
+          value = tostring(var.ai_monthly_budget_usd)
+        }
+        env {
+          name  = "FX_PAPER_RISK"
+          value = var.fx_paper_risk
+        }
+        volume_mounts {
+          name       = "state"
+          mount_path = "/app/state"
+        }
+      }
+
+      volumes {
+        name = "state"
+        gcs {
+          bucket        = google_storage_bucket.state.name
+          mount_options = ["only-dir=state", "implicit-dirs", "uid=1000", "gid=1000"]
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    google_storage_bucket_iam_member.gui_state,
+    google_project_iam_member.gui_ai,
+  ]
+}
+
+# ジョブを起こすだけのアカウント
+resource "google_service_account" "scheduler" {
+  account_id   = "${local.name}-scheduler"
+  display_name = "algo-trading: ペーパー運用を1時間ごとに起こす"
+}
+
+resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
+  count    = length(google_cloud_run_v2_job.fx_paper)
+  name     = google_cloud_run_v2_job.fx_paper[0].name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = google_service_account.scheduler.member
+}
+
+resource "google_cloud_scheduler_job" "fx_paper" {
+  count = length(google_cloud_run_v2_job.fx_paper)
+
+  name      = "${local.name}-fx-paper-hourly"
+  region    = var.region
+  schedule  = "1 * * * 1-6" # 毎時1分。月〜土（土曜の朝まで市場が開いている）。閉まっていればスクリプトが何もしない
+  time_zone = "Asia/Tokyo"
+  paused    = var.fx_paper_paused
+
+  http_target {
+    http_method = "POST"
+    uri         = "https://run.googleapis.com/v2/projects/${var.project}/locations/${var.region}/jobs/${google_cloud_run_v2_job.fx_paper[0].name}:run"
+    oauth_token {
+      service_account_email = google_service_account.scheduler.email
+      scope                 = "https://www.googleapis.com/auth/cloud-platform"
+    }
+  }
+
+  depends_on = [google_project_service.apis]
 }

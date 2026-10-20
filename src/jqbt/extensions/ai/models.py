@@ -89,8 +89,8 @@ DEFAULTS: tuple[ModelSpec, ...] = (
     _claude("anthropic", "claude-haiku-5-5", "Claude Haiku 5.5", 0.10, 0.50, 0.01, False, ""),
 )
 DEFAULT_MODEL = "vertex:claude-opus-5-5"
-ROLES = ("explain", "report", "ideas", "decide")
-ROLE_LABELS = {"explain": "A 質問", "report": "B 要約", "ideas": "C 案", "decide": "D 判断"}
+ROLES = ("explain", "report", "ideas", "decide", "fx")
+ROLE_LABELS = {"explain": "A 質問", "report": "B 要約", "ideas": "C 案", "decide": "D 判断", "fx": "E FX の判断"}
 
 
 def normalize(key: str) -> str:
