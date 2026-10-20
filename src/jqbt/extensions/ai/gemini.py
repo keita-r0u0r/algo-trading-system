@@ -2,7 +2,8 @@
 
   * ``genai.Client(enterprise=True, project=..., location=...)`` で Vertex AI に接続する（認証は gcloud のログイン）
   * 決まった形の答え: ``response_mime_type="application/json"`` と ``response_json_schema``
-  * 考える深さ: ``thinking_config.thinking_level``（low / medium / high を LOW / MEDIUM / HIGH に対応させる）
+  * 考える深さ: 3.x 以降は ``thinking_level``（LOW / MEDIUM / HIGH）、2.x は ``thinking_budget``（トークン数）。
+    2.x に thinking_level を送ると 400 になる（2026-10-20 に Gemini 2.5 Flash で確認）
   * 使ったトークン: 思考（``thoughts_token_count``）も出力として課金されるので、出力に足す
   * 安全上の理由で止まった（``prompt_feedback.block_reason`` / ``finish_reason`` が SAFETY など）ときは ``RefusalError``
 """
@@ -16,6 +17,15 @@ from .assistant import AiError, RefusalError
 from .ports import ModelReply
 
 LEVELS = {"low": "LOW", "medium": "MEDIUM", "high": "HIGH"}
+#: 2.x の思考に使うトークン数の上限（effort に対応させる）
+BUDGETS = {"low": 1024, "medium": 4096, "high": 8192}
+
+
+def thinking_config(model: str, effort: str) -> dict[str, Any]:
+    """モデルの世代に合わせた、考える深さの指定。"""
+    if model.startswith("gemini-2."):
+        return {"thinking_budget": BUDGETS.get(effort, BUDGETS["medium"])}
+    return {"thinking_level": LEVELS.get(effort, "MEDIUM")}
 #: 安全上の理由で止まった扱いにする finish_reason
 BLOCKED = {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"}
 
@@ -45,7 +55,7 @@ class GeminiModel:
         config: dict[str, Any] = {
             "system_instruction": system,
             "max_output_tokens": 16000,
-            "thinking_config": {"thinking_level": LEVELS.get(effort, "MEDIUM")},
+            "thinking_config": thinking_config(model, effort),
         }
         if schema is not None:
             config.update(response_mime_type="application/json", response_json_schema=schema)
@@ -86,6 +96,7 @@ class GeminiModel:
 def _describe(exc: Exception) -> str:
     code = getattr(exc, "code", None)
     messages = {
+        400: "リクエストが受け付けられませんでした（このモデルが対応していない設定の可能性があります）",
         401: "認証に失敗しました（gcloud auth application-default login を確認）",
         403: "権限がありません（Vertex AI の API の有効化と、プロジェクトの権限を確認）",
         404: "モデルが見つかりません（モデルID・リージョン・Model Garden での有効化を確認）",

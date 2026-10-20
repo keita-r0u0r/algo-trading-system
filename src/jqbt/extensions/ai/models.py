@@ -78,6 +78,10 @@ DEFAULTS: tuple[ModelSpec, ...] = (
               "2027年以降の料金で見積もり（それまでは半額）"),
     ModelSpec("vertex", "gemini-3.1-pro-preview", "Gemini 3.1 Pro（プレビュー）", "gemini", 2.00, 12.00, 0.20, False,
               "入力20万トークンまでの料金"),
+    ModelSpec("vertex", "gemini-2.5-flash", "Gemini 2.5 Flash", "gemini", 0.30, 2.50, 0.03, False,
+              "2.0 Flash（提供終了）の後継"),
+    ModelSpec("vertex", "gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "gemini", 0.10, 0.40, 0.01, False,
+              "最も安い Gemini"),
     # --- Anthropic 直接。断られたときのサーバー側の切り替えがある（Haiku を除く） ---
     _claude("anthropic", "claude-fable-5-1", "Claude Fable 5.1", 10.00, 50.00, 0.25, True, ""),
     _claude("anthropic", "claude-opus-5-5", "Claude Opus 5.5", 4.00, 20.00, 0.20, True, ""),

@@ -487,6 +487,13 @@ def test_gemini_requests_json_and_thinking_level_and_counts_thoughts_as_output()
                            "cache_creation_input_tokens": 0}
 
 
+def test_gemini_2_models_get_a_thinking_budget_instead_of_a_level():
+    """2.x に thinking_level を送ると 400 になる。世代で指定の仕方を変える。"""
+    client = FakeGenai(gemini_result("ok"))
+    GeminiModel(client=client).ask(model="gemini-2.5-flash", system="s", prompt="p", effort="high")
+    assert client.requests[0]["config"]["thinking_config"] == {"thinking_budget": 8192}
+
+
 @pytest.mark.parametrize("result", [gemini_result(block=SimpleNamespace(name="SAFETY")), gemini_result(finish="SAFETY")])
 def test_gemini_safety_blocks_are_refusals(result):
     with pytest.raises(RefusalError):
