@@ -6,6 +6,7 @@
   python scripts/fx_real.py                    # 取引の少ない候補（low_freq）を検証
   python scripts/fx_real.py --set intraday     # 1分足で頻繁に売買する候補（コストに負けると分かったもの）
   python scripts/fx_real.py --run-lockbox      # 最良の候補を、取り置いた期間で一度だけ評価する
+  python scripts/fx_real.py --risk all         # リスクの度合い（小・中・最大）で並べる。一切売買しない場合も
 
 ## 条件（GMOコイン 外国為替FX の API 取引）
 
@@ -36,7 +37,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from jqbt.application.fx_backtest import FxConfig, run_fx  # noqa: E402
-from jqbt.core.fx.model import FxCosts, FxInstrument  # noqa: E402
+from jqbt.core.fx.model import RISK_PROFILES, FxCosts, FxInstrument  # noqa: E402
 from jqbt.core.selection import expected_max_sharpe  # noqa: E402
 from jqbt.infrastructure import experiment_log  # noqa: E402
 from jqbt.infrastructure.gmo_fx import GmoFxClient  # noqa: E402
@@ -48,6 +49,7 @@ from jqbt.strategies.fx import (  # noqa: E402
     GotobiFix,
     HourlyBreakout,
     LondonBreakout,
+    NoTradeFx,
     RandomFx,
     RangeBreakout,
 )
@@ -71,7 +73,10 @@ CANDIDATE_SETS = {
     },
 }
 #: 比べる基準（試行回数に数えない）
-BASELINES = {"low_freq": {"buy_and_hold": (BuyAndHoldFx, True)}}
+BASELINES = {
+    "intraday": {"no_trade": (NoTradeFx, False)},
+    "low_freq": {"no_trade": (NoTradeFx, False), "buy_and_hold": (BuyAndHoldFx, True)},
+}
 #: ランダムに入る戦略。候補と同じくらいの頻度にする
 RANDOM = {
     "intraday": lambda s: RandomFx(seed=s),
@@ -96,12 +101,13 @@ def by_month(bars: pd.DataFrame) -> dict[str, pd.DataFrame]:
 def run_months(months: dict[str, pd.DataFrame], make, config: FxConfig, overnight: bool = False) -> dict:
     """月ごとに資金を戻して走らせる。日をまたぐ候補も、月の終わりには手仕舞う。"""
     config = replace(config, flat_at_day_end=not overnight)
-    returns, pnls, trades, losscuts, cost = [], [], 0, 0, 0.0
+    returns, pnls, trades, losscuts, cost, units = [], [], 0, 0, 0.0, []
     for bars in months.values():
         result = run_fx(bars, make(), config)
         m = result.summary
         returns.append(m["total_return"])
         pnls.extend(t.pnl for t in result.trades)
+        units.extend(abs(t.units) for t in result.trades)
         trades += m["trades"]
         cost += m["total_cost"]
         losscuts += int(m["losscut"])
@@ -118,7 +124,37 @@ def run_months(months: dict[str, pd.DataFrame], make, config: FxConfig, overnigh
         "t": t,
         "losscut_months": losscuts,
         "cost": cost,
+        "units": float(np.mean(units)) if units else None,
     }
+
+
+def compare_risk(args, dev: dict, config: FxConfig, candidates: dict, data_end: str) -> int:
+    """同じ売買の判断を、リスクの度合いだけ変えて並べる。
+
+    判断は同じなので、優位性の有無（t 値の符号）は変わらない。変わるのは月の損益の振れ幅、
+    ロスカットで終わる月、コストの額。目的（その月に資産が増える確率）にどう効くかを見る。
+    """
+    profiles = list(RISK_PROFILES) if args.risk == "all" else [args.risk]
+    rows = {**candidates, **BASELINES.get(args.set, {})}
+    print("\n【リスクの度合い】" + " / ".join(
+        f"{p}: 1回の損切りで資金の{RISK_PROFILES[p].risk_per_trade:.1%}、{RISK_PROFILES[p].max_leverage:g}倍まで、"
+        f"1日 −{RISK_PROFILES[p].daily_loss_limit:.0%} で停止" for p in profiles))
+    print(f"  {'戦略':<20}{'度合い':<8}{'月の平均':>8}{'増えた月':>9}{'最悪の月':>9}{'最良の月':>9}{'ロスカット':>8}{'取引/月':>8}{'数量の平均':>10}")
+    for name, (make, overnight) in rows.items():
+        for profile in profiles:
+            r = run_months(dev, make, replace(config, risk=RISK_PROFILES[profile]), overnight)
+            best = max(r["returns"])
+            print(f"  {name:<20}{profile:<8}{r['mean_return']:>+8.2%}{r['positive_months']:>5}/{r['months']:<3}"
+                  f"{r['worst_month']:>+9.1%}{best:>+9.1%}{r['losscut_months']:>8}{r['trades'] / r['months']:>8.0f}"
+                  f"{(r['units'] or 0):>10,.0f}")
+            if name not in BASELINES.get(args.set, {}):
+                experiment_log.append({
+                    "kind": "fx_risk", "label": f"{name}_{profile}", "strategy": name, "risk": profile,
+                    "symbol": args.symbol, "data_end": data_end, "mean_monthly_return": r["mean_return"],
+                    "positive_months": r["positive_months"], "months": r["months"], "losscut_months": r["losscut_months"],
+                })
+    print("  ※ 判断は同じで、数量だけが違う（試行回数には数えない）。no_trade は一切売買しない基準")
+    return 0
 
 
 def spread_profile(bars: pd.DataFrame) -> None:
@@ -152,6 +188,8 @@ def main() -> int:
     parser.add_argument("--lockbox-months", type=int, default=3)
     parser.add_argument("--random-seeds", type=int, default=20)
     parser.add_argument("--run-lockbox", action="store_true")
+    parser.add_argument("--risk", choices=["all", *RISK_PROFILES], default=None,
+                        help="リスクの度合いで数量を決めて並べる（売買の判断は同じなので、試行回数には数えない）")
     args = parser.parse_args()
     candidates = CANDIDATE_SETS[args.set]
     explicit_spread = args.max_entry_spread is not None
@@ -177,6 +215,9 @@ def main() -> int:
     print(f"{args.symbol} / 資金 {args.cash:,.0f}円を毎月戻す / 1回 {args.units:,.0f}通貨 / API 手数料 0.002% / ロスカット 100%")
     print(f"開発期間 {names[0]} 〜 {list(dev)[-1]}（{len(dev)} か月）/ "
           f"取り置き {list(lock)[0]} 〜 {names[-1]}（{len(lock)} か月・{'使用済み' if experiment_log.lockbox_used(data_end) else '未使用'}）")
+
+    if args.risk:
+        return compare_risk(args, dev, config, candidates, data_end)
 
     dev_bars = pd.concat(dev.values())
     spread_profile(dev_bars)

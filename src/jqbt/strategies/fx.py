@@ -224,3 +224,12 @@ class BuyAndHoldFx:
 
     def decide(self, view: FxView, position: FxPosition) -> FxSignal | None:
         return None if position.is_open else FxSignal(1, reason="買って持つ")
+
+
+class NoTradeFx:
+    """一切売買しない。資金はそのまま（0%）。**比べる基準**。ここに負けるなら、やらないほうがまし。"""
+
+    name = "no_trade"
+
+    def decide(self, view: FxView, position: FxPosition) -> FxSignal | None:
+        return None
