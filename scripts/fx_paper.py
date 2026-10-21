@@ -224,6 +224,7 @@ def main() -> int:
             data = reply.data or {}
             decisions.append((data, f"AI {reply.model}: {data.get('reasoning', '')}",
                               {"model": reply.model, "call_id": reply.call_id, "confidence": data.get("confidence"),
+                               "prompt_version": getattr(ai, "fx_prompt_version", None),
                                # AI が見たもの。根拠と照らし合わせて、改善の種にする（scripts/fx_paper_review.py）
                                "context": context}))
         elif name == "rule_hourly_breakout":

@@ -76,6 +76,8 @@ def main() -> int:
             "確信度": d.get("confidence", ""),
             "期間": d.get("horizon", ""),
             "結果": "通過" if e.get("approved") else (e.get("rejected") or "見送り"),
+            # 前提文の版。記録が無いものは最初の版（検証向けの慎重な前提文を共用していた）
+            "版": e.get("prompt_version") or "fx-v1",
             **moves,
             "根拠": (d.get("reasoning") or "")[:120],
         })
@@ -89,7 +91,8 @@ def main() -> int:
 
     holds = frame[frame["判断"] == "hold"]
     print("\n【まとめ】")
-    print(f"  判断 {len(frame)} 回: " + " / ".join(f"{k} {v}" for k, v in Counter(frame['判断']).items()))
+    for version, group in frame.groupby("版"):
+        print(f"  {version}: 判断 {len(group)} 回: " + " / ".join(f"{k} {v}" for k, v in Counter(group['判断']).items()))
     if not holds.empty and "up_4h" in holds:
         big = holds[(holds["up_4h"] >= BIG_MOVE) | (holds["down_4h"] >= BIG_MOVE)]
         print(f"  見送った {len(holds)} 回のうち、4時間以内に ±{BIG_MOVE:g} pips 以上動いたのは {len(big)} 回"

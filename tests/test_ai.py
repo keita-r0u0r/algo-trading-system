@@ -506,3 +506,25 @@ def test_gemini_errors_are_explained_by_status_code():
 
     with pytest.raises(AiError, match="Model Garden"):
         GeminiModel(client=FakeGenai(error=APIError())).ask(model="g", system="s", prompt="p")
+
+
+def test_fx_role_uses_its_own_system_prompt_and_records_version(tmp_path):
+    from jqbt.extensions.ai.assistant import FX_PROMPT_VERSION, FX_SYSTEM, SYSTEM, AiAssistant, AiBudget
+    from jqbt.extensions.ai.models import ModelSettings
+    from jqbt.extensions.ai.ports import ModelReply
+    from jqbt.extensions.ai.usage import JsonlUsageLog
+
+    seen = {}
+
+    class Fake:
+        def ask(self, *, model, system, prompt, schema, effort):
+            seen["system"] = system
+            return ModelReply(text="", data={"action": "hold"}, model=model, usage={})
+
+    usage = JsonlUsageLog(tmp_path / "usage.jsonl")
+    ai = AiAssistant(Fake(), usage, AiBudget(5), ModelSettings(tmp_path / "s.json", environ={}))
+    ai.fx_decide({"frame": {}, "account": {}, "market": {}}, dt.date(2026, 10, 21))
+    assert seen["system"] == FX_SYSTEM != SYSTEM
+    assert usage.records()[-1]["prompt_version"] == FX_PROMPT_VERSION
+    ai.explain("q", {}, dt.date(2026, 10, 21))
+    assert seen["system"] == SYSTEM
