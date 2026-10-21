@@ -51,9 +51,31 @@ tofu -chdir=infra output url
 
 ### 組織に属していないプロジェクトの IAP
 
-個人の Google アカウントで作ったプロジェクト（組織なし）では、IAP の初回の設定に Cloud コンソールでの操作が要ることがあります。
-`make deploy` が IAP や OAuth の設定で失敗したら、コンソールの「セキュリティ」→「Identity-Aware Proxy」を開き、
-案内に従って OAuth の同意画面（ユーザーの種類は「外部」、テストユーザーに自分のアカウント）を設定してから、もう一度 `make deploy` します。
+個人の Google アカウントで作ったプロジェクト（組織なし）では、Google が用意する OAuth クライアントが使えません。
+そのままだと、画面を開いたときに `Empty Google Account OAuth client ID(s)/secret(s).` と出ます。自分で作った OAuth クライアントを IAP に設定します。
+
+1. コンソールの「Google Auth Platform」で、同意画面を作る（ユーザーの種類は「外部」。テストユーザーに自分のアカウントを足す）
+2. 「クライアント」で、種類「ウェブ アプリケーション」の OAuth クライアントを作る
+3. 作ったクライアントの「承認済みのリダイレクト URI」に、次を足す（`<クライアントID>` は作ったものに置き換える）
+
+   ```
+   https://iap.googleapis.com/v1/oauth/clientIds/<クライアントID>:handleRedirect
+   ```
+
+4. シークレットを Secret Manager に置く（値は画面に出ない）
+
+   ```bash
+   gcloud secrets create iap-oauth-client-secret --replication-policy=automatic
+   read -rs "V?OAuth クライアントのシークレット: "; echo; printf %s "$V" | gcloud secrets versions add iap-oauth-client-secret --data-file=-; unset V
+   ```
+
+5. `infra/terraform.tfvars` にクライアントID を書き、`make infra-apply` する
+
+   ```hcl
+   iap_oauth_client_id = "xxxxxxxx.apps.googleusercontent.com"
+   ```
+
+シークレットは OpenTofu の状態（非公開のバケット `<プロジェクト>-tfstate`）にも残ります。
 
 ## 更新する
 

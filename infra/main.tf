@@ -388,3 +388,27 @@ resource "google_cloud_scheduler_job" "fx_paper" {
 
   depends_on = [google_project_service.apis]
 }
+
+# --- IAP のログイン（OAuth クライアント） --------------------------------------------
+# 組織に属していないプロジェクトでは、Google が用意する OAuth クライアントが使えない
+# （画面を開くと「Empty Google Account OAuth client ID(s)/secret(s)」）。自分で作ったものを使う。
+# クライアントID は terraform.tfvars に、シークレットは Secret Manager（iap-oauth-client-secret）に置く。
+# 手順は docs/cloud-run.md。シークレットは OpenTofu の状態（非公開のバケット）にも残る
+
+data "google_secret_manager_secret_version" "iap_oauth" {
+  count  = var.iap_oauth_client_id == "" ? 0 : 1
+  secret = "iap-oauth-client-secret"
+}
+
+resource "google_iap_settings" "oauth" {
+  count = var.iap_oauth_client_id == "" ? 0 : 1
+  name  = "projects/${var.project}/iap_web"
+
+  access_settings {
+    oauth_settings {
+      client_id     = var.iap_oauth_client_id
+      client_secret = data.google_secret_manager_secret_version.iap_oauth[0].secret_data
+    }
+  }
+  depends_on = [google_project_service.apis]
+}

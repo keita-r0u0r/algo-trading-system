@@ -43,3 +43,9 @@ variable "fx_paper_paused" {
   type        = bool
   default     = false
 }
+
+variable "iap_oauth_client_id" {
+  description = "IAP のログインに使う OAuth クライアントID（組織に属していないプロジェクトで必要）。空なら設定しない"
+  type        = string
+  default     = ""
+}
