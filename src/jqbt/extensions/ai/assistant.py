@@ -50,6 +50,27 @@ SYSTEM = """あなたは、個人が使う売買ルールの検証と少額運�
 - 投資の推奨はしない。数字の読み方と、確かめるべきことを示す
 - 一見良い成績には、まずバグ・先読み・偶然・コスト前提を疑う"""
 
+#: E（FX の判断）だけの前提。検証向けの SYSTEM は「優位性は無い」「良い成績は疑う」と慎重なので、
+#: 判断がいつも見送りに寄った（2026-10-21 の記録で4回とも hold）。判断役には、枠の中で機会を探す役目を与える。
+#: 文面を変えたら FX_PROMPT_VERSION を上げる（記録を版ごとに分けて比べるため）
+FX_PROMPT_VERSION = "fx-v2"
+FX_SYSTEM = """あなたは、個人の FX のペーパー運用（仮想の約定。実際の注文は出ない）で、1時間に1回、売買を判断する役です。
+
+役目:
+- 決められた枠の中で、コスト（往復約1 pip）を十分に上回る値幅が見込める取引の機会を探し、あれば具体的に提案する
+- 機会が無ければ見送る。ただし「統計的に証明された優位性が無い」ことは見送る理由にしない。
+  この運用は、あなたの判断に優位性があるかを前向きに記録して確かめるためのもの。判断しなければ確かめられない
+- 損切りの幅とリスクの割合は、見込む値幅と確信度に合わせて自分で決める。確信度が低いならリスクを小さく
+
+判断の材料:
+- 渡したデータ（各通貨ペアの1時間足、値幅、スプレッド、日米の金利差、口座の状態）だけを使う
+- あなたの学習データに含まれる期間の値動きの知識は使わない
+- 根拠は、どのデータのどの動きを見たかが分かるように書く（あとで値動きと照らし合わせて振り返る）
+
+答え方:
+- 日本語で、平易に
+- 決まった形（JSON）で返す"""
+
 #: 役割ごとの考える深さ（effort）。説明と要約は medium、案と判断は high
 EFFORT = {"explain": "medium", "report": "medium", "ideas": "high", "decide": "high", "fx": "medium"}
 
@@ -280,6 +301,9 @@ def shortlist(view: Any, symbols: list[str], budget: float, size: int = 30) -> l
 # 本体
 # ----------------------------------------------------------------------
 class AiAssistant:
+    #: E（FX の判断）の前提文の版。ペーパー運用の記録に残す
+    fx_prompt_version = FX_PROMPT_VERSION
+
     def __init__(
         self,
         model: LanguageModel,
@@ -329,7 +353,8 @@ class AiAssistant:
         }
         started = time.monotonic()
         try:
-            reply = self.model.ask(model=key, system=SYSTEM, prompt=prompt, schema=schema, effort=EFFORT[role])
+            system = FX_SYSTEM if role == "fx" else SYSTEM
+            reply = self.model.ask(model=key, system=system, prompt=prompt, schema=schema, effort=EFFORT[role])
         except RefusalError as exc:
             self.usage.append({**record, "ok": False, "error": str(exc)[:200],
                                "latency_ms": int((time.monotonic() - started) * 1000), "cost_usd": 0.0})
@@ -355,6 +380,7 @@ class AiAssistant:
             "cost_usd": round(cost_usd(reply.usage, price_key), 6),
             # D の判断は、あとで戦績と結び付けるために中身も残す
             "decision": reply.data if role in ("decide", "fx") else None,
+            "prompt_version": FX_PROMPT_VERSION if role == "fx" else None,
         })
         if not schema_ok:
             raise AiError("AI の答えが決まった形になっていませんでした。もう一度試してください")
@@ -420,7 +446,7 @@ class AiAssistant:
             "- take_pips は利確の幅。付けないなら 0\n"
             "- 建玉を持っている間は、close か hold だけ。向きを変えたいなら、まず close\n"
             "- コストは往復で約1 pip（スプレッド・手数料・ずれ）。それより十分大きい値幅を見込めないなら hold\n"
-            "- 根拠が弱いときは hold を選ぶ。hold のとき symbol は空文字、数値は 0\n"
+            "- hold のとき symbol は空文字、数値は 0\n"
             "- あなたの学習データに含まれる期間の値動きの知識を、判断に使わないこと。渡したデータだけで判断する\n\n"
             f"<frame>\n{to_context(context.get('frame', {}))}\n</frame>\n\n"
             f"<account>\n{to_context(context.get('account', {}))}\n</account>\n\n"
