@@ -123,3 +123,14 @@ def test_hourly_breakout_target():
 def test_account_round_trips_through_dict():
     acc = PaperAccount("ai", 10_000, 9_900, PaperPosition("EUR_JPY", -200, 170.0, 170.5, None, "x"), equity=9_950)
     assert PaperAccount.from_dict(acc.to_dict()) == acc
+
+
+def test_moves_after_reports_change_and_extremes():
+    from jqbt.application.fx_paper import moves_after
+
+    index = pd.date_range("2026-10-21 10:00", periods=120, freq="1min")
+    bars = pd.DataFrame({"open": 158.0, "high": 158.0, "low": 158.0, "close": 158.0}, index=index)
+    bars.loc[index[30], "high"] = 158.25  # 30分後に +25 pips の上ひげ
+    bars.loc[index[59], "close"] = 157.9
+    moves = moves_after(bars, index[0], hours=(1, 4))
+    assert moves == {"change_1h": -10.0, "up_1h": 25.0, "down_1h": 0.0}  # 4時間後はデータが無いので含めない

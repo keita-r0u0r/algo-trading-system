@@ -214,16 +214,18 @@ def main() -> int:
             if ai is None:
                 accounts[name] = account
                 continue
+            context = ai_context(account, frame, quotes, bars, now, events + new_events, today_rates)
             try:
-                reply = ai.fx_decide(ai_context(account, frame, quotes, bars, now, events + new_events, today_rates),
-                                     now.date())
+                reply = ai.fx_decide(context, now.date())
             except Exception as exc:  # AI が使えなくても、他の口座は進める
                 new_events.append({"kind": "decision", "account": name, "at": now.isoformat(), "error": str(exc)[:300]})
                 accounts[name] = account
                 continue
             data = reply.data or {}
             decisions.append((data, f"AI {reply.model}: {data.get('reasoning', '')}",
-                              {"model": reply.model, "call_id": reply.call_id, "confidence": data.get("confidence")}))
+                              {"model": reply.model, "call_id": reply.call_id, "confidence": data.get("confidence"),
+                               # AI が見たもの。根拠と照らし合わせて、改善の種にする（scripts/fx_paper_review.py）
+                               "context": context}))
         elif name == "rule_hourly_breakout":
             want = hourly_breakout_target(hourly(bars[BASE], now))
             held = 0 if account.position is None else (1 if account.position.units > 0 else -1)

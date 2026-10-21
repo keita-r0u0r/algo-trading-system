@@ -39,6 +39,19 @@ python scripts/fx_paper.py --risk small     # リスクの度合いを変える�
 Cloud Run では、Cloud Scheduler が月〜土の毎時1分に呼びます（[cloud-run.md](cloud-run.md)）。市場が閉まっていれば何もしません。
 結果は操作盤の「FX ペーパー」で見られます。記録は `state/fx_paper.jsonl`（追記のみ）です。
 
+## 振り返り（改善の種）
+
+AI の判断には、根拠（理由・確信度・想定する期間・リスク）と、**そのとき AI が見ていた入力** をそのまま記録します。
+`scripts/fx_paper_review.py` は、判断ごとに根拠と、判断のあと1・4・24時間の値動き（pips）を並べます。
+
+```bash
+gcloud storage cp gs://<プロジェクト>-algo-trading-state/state/fx_paper.jsonl .
+python scripts/fx_paper_review.py --log fx_paper.jsonl
+```
+
+見るのは、根拠の偏り（毎回同じ理由で見送っていないか）と、見送った回にコストを大きく超える値動きがどれだけあったかです。
+値動きは結果論なので、1回ごとの当たり外れでプロンプトを変えないでください。変えたら、変える前の記録とは別物として比べます。
+
 ## 費用
 
 AI（Gemini 2.5 Flash-Lite）は1回 $0.002 ほどです。1時間に1回なら月に約 $1 で、月の上限（$5）に含まれます。

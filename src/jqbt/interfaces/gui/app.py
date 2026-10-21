@@ -459,7 +459,10 @@ if page == "FX ペーパー":
             "結果・理由": ("通過" if e.get("approved") else e.get("rejected") or e.get("error") or "見送り")
             if e.get("kind") == "decision" else (f"{e['pnl']:+,.0f}円 " if "pnl" in e else "") + str(e.get("reason", "")),
             "AI": e.get("model", ""),
+            "確信度": (e.get("decision") or {}).get("confidence", ""),
+            "根拠": (e.get("decision") or {}).get("reasoning", ""),
         } for e in reversed(recent)]), hide_index=True, width="stretch")
+        st.caption("判断のあとの値動きと根拠の照らし合わせは scripts/fx_paper_review.py。値動きは結果論なので、傾向を見る")
 
 # ----------------------------------------------------------------------
 # FX検証（ダミーデータ）

@@ -214,3 +214,24 @@ def hourly_breakout_target(hourly: pd.DataFrame, window: int = 20) -> int:
     if last["close"] < previous["low"].min():
         return -1
     return 0
+
+
+def moves_after(bars: pd.DataFrame, at: pd.Timestamp, hours: tuple[int, ...] = (1, 4, 24), pip: float = 0.01) -> dict:
+    """判断のあと、値段がどう動いたか（pips）。見送った判断が正しかったかを振り返るために使う。
+
+    ``bars`` は仲値の1分足。返すのは、時間ごとの終値の変化と、その間に上下へ最大どれだけ動いたか。
+    データが足りない時間は含めない。
+    """
+    after = bars[bars.index >= at]
+    if after.empty:
+        return {}
+    start = float(after["open"].iloc[0])
+    out: dict[str, float] = {}
+    for h in hours:
+        window = after[after.index < at + pd.Timedelta(hours=h)]
+        if window.empty or window.index[-1] < at + pd.Timedelta(hours=h) - pd.Timedelta(minutes=5):
+            continue
+        out[f"change_{h}h"] = round((float(window["close"].iloc[-1]) - start) / pip, 1)
+        out[f"up_{h}h"] = round((float(window["high"].max()) - start) / pip, 1)
+        out[f"down_{h}h"] = round((start - float(window["low"].min())) / pip, 1)
+    return out
