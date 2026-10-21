@@ -1,3 +1,5 @@
 # cp infra/terraform.tfvars.example infra/terraform.tfvars して書き換える（terraform.tfvars は Git に入れない）
 project       = "your-project-id"
 allowed_users = ["user:you@example.com"]
+# 組織に属していないプロジェクトでは必要（docs/cloud-run.md）。シークレットは Secret Manager の iap-oauth-client-secret に置く
+# iap_oauth_client_id = "xxxxxxxx.apps.googleusercontent.com"
