@@ -100,12 +100,21 @@ def by_month(bars: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return {m: bars[month.to_numpy() == m] for m in sorted(month.unique())}
 
 
-def run_months(months: dict[str, pd.DataFrame], make, config: FxConfig, overnight: bool = False) -> dict:
-    """月ごとに資金を戻して走らせる。日をまたぐ候補も、月の終わりには手仕舞う。"""
+def run_months(months: dict[str, pd.DataFrame], make, config: FxConfig, overnight: bool = False,
+               warmup: dict[str, pd.DataFrame] | None = None) -> dict:
+    """月ごとに資金を戻して走らせる。日をまたぐ候補も、月の終わりには手仕舞う。
+
+    ``warmup`` があれば、各月の前に「助走」の足（前の月の終わり）を戦略に見せてから始める（売買はしない）。
+    """
     config = replace(config, flat_at_day_end=not overnight)
     returns, pnls, trades, losscuts, cost, units = [], [], 0, 0, 0.0, []
-    for bars in months.values():
-        result = run_fx(bars, make(), config)
+    for month, bars in months.items():
+        if warmup and month in warmup and not warmup[month].empty:
+            run_config = replace(config, trade_from=bars.index[0])
+            bars = pd.concat([warmup[month], bars])
+        else:
+            run_config = config
+        result = run_fx(bars, make(), run_config)
         m = result.summary
         returns.append(m["total_return"])
         pnls.extend(t.pnl for t in result.trades)
@@ -127,6 +136,7 @@ def run_months(months: dict[str, pd.DataFrame], make, config: FxConfig, overnigh
         "losscut_months": losscuts,
         "cost": cost,
         "units": float(np.mean(units)) if units else None,
+        "pnls": pnls,
     }
 
 

@@ -80,6 +80,9 @@ class FxConfig:
     swap_short: float = 0.0
     #: リスクの度合い。あれば数量はここから決め（``units`` は使わない）、1日の損失の上限も効かせる
     risk: RiskProfile | None = None
+    #: この時刻より前の足は「助走」。戦略には見せて状態（過去20日の高値など）を作らせるが、売買しない。
+    #: 月ごとに資金を戻して評価するとき、月の初めに過去の足を知らない状態で始まらないようにする
+    trade_from: Any = None
 
 
 @dataclass
@@ -147,6 +150,13 @@ def run_fx(bars: pd.DataFrame, strategy: FxStrategy, config: FxConfig = FxConfig
         t = times[i]
         if spread is not None:
             costs = replace(base_costs, spread_pips=spread[i])
+        # 助走: 戦略に見せるだけ。売買も評価もしない
+        if config.trade_from is not None and t < config.trade_from:
+            equity[i] = cash
+            if i < n - 1:
+                strategy.decide(FxView(i, t, o[: i + 1], h[: i + 1], lo[: i + 1], c[: i + 1], int(left[i])), position)
+            continue
+
         # 0. 営業日が替わったら、持ち越した建玉のスワップ。1日の損失の基準もここで取り直す
         if i > 0 and day_of[i] != day_of[i - 1]:
             if position.is_open:

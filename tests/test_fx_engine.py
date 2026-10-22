@@ -284,3 +284,45 @@ def test_wareki_dates():
     assert parse_wareki("R8.9.30") == dt.date(2026, 9, 30)
     assert parse_wareki("H31.4.30") == dt.date(2019, 4, 30)
     assert parse_wareki("基準日") is None
+
+
+def test_daily_breakout_enters_after_close_above_20_day_high():
+    from jqbt.strategies.fx import DailyBreakout
+
+    # 22営業日。毎日 10:00 の1本だけ（高値 150.5・安値 149.5）。最後の日だけ 151 で引ける
+    rows, index = [], []
+    days = pd.bdate_range("2025-01-06", periods=23)
+    for k, day in enumerate(days):
+        close = 151.0 if k == 21 else 150.0
+        for hhmm in ("09:00", "10:00"):
+            index.append(pd.Timestamp(f"{day.date()} {hhmm}"))
+            rows.append((150.0, max(150.5, close), 149.5, close))
+    data = pd.DataFrame(rows, columns=["open", "high", "low", "close"], index=pd.DatetimeIndex(index))
+    rule = DailyBreakout(window=20)
+    signals = []
+    for i in range(len(data)):
+        from jqbt.application.fx_backtest import FxView
+        view = FxView(i, data.index[i], data["open"].to_numpy()[: i + 1], data["high"].to_numpy()[: i + 1],
+                      data["low"].to_numpy()[: i + 1], data["close"].to_numpy()[: i + 1], 10)
+        s = rule.decide(view, FxPosition())
+        if s is not None:
+            signals.append((data.index[i], s.target))
+    # 22日目（151 で引けた日）の翌朝9時に買い。それより前には何も出さない
+    assert signals == [(pd.Timestamp(f"{days[22].date()} 09:00"), 1)]
+
+
+def test_warmup_bars_feed_strategy_but_do_not_trade():
+    seen = []
+
+    class Watch:
+        name = "watch"
+
+        def decide(self, view, position):
+            seen.append(view.index)
+            return FxSignal(1)  # 毎回買いたがる
+
+    data = bars([(150, 150, 150, 150)] * 6)
+    result = run_fx(data, Watch(), config(trade_from=data.index[3]))
+    assert seen[:3] == [0, 1, 2]  # 助走の足も見ている
+    # 助走中の判断は捨てる。最初の約定は、助走のあと最初の判断（足3）を足4の始値で
+    assert result.trades[0].entry_at == data.index[4]

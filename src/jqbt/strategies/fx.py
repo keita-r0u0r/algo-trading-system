@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 from ..application.fx_backtest import FxView
 from ..core.fx.model import FxPosition, FxSignal
@@ -274,3 +275,42 @@ class RateMomentum:
         if want == 0:
             return FxSignal(0, reason="金利差の変化が小さい")
         return FxSignal(want, self.stop_pips, None, "金利差が拡大" if want > 0 else "金利差が縮小")
+
+
+class DailyBreakout:
+    """前の営業日の終値が、その前の20営業日の高値・安値を抜けたら、その向きに入る（ドテン）。日をまたいで持つ。
+
+    保有を長くするほどコスト（往復約1 pip）が相対的に軽くなる、という検証の結果から足した候補。
+    毎朝9時に判断する。損切り150 pips（枠の上限）。数値は結果を見る前に決めて固定した（2026-10-21）。
+    """
+
+    def __init__(self, window: int = 20, stop_pips: float = 150) -> None:
+        self.window, self.stop_pips = window, stop_pips
+        self.name = f"daily_breakout_{window}"
+        self._days: list[tuple[float, float, float]] = []  # 終わった営業日の (高値, 安値, 終値)
+        self._session = None
+        self._high = self._low = self._close = None
+        self._decided_on = None
+
+    def decide(self, view: FxView, position: FxPosition) -> FxSignal | None:
+        t = view.time
+        # 営業日は朝6〜7時に替わる。9時より前の足は前の営業日に含める
+        session = (t - pd.Timedelta(hours=7)).date()
+        if session != self._session:
+            if self._session is not None and self._high is not None:
+                self._days.append((self._high, self._low, self._close))
+            self._session, self._high, self._low = session, view.high[-1], view.low[-1]
+        else:
+            self._high, self._low = max(self._high, view.high[-1]), min(self._low, view.low[-1])
+        self._close = view.close[-1]
+        if t.hour != 9 or t.minute != 0 or self._decided_on == t.date() or len(self._days) <= self.window:
+            return None
+        self._decided_on = t.date()
+        last_close = self._days[-1][2]
+        previous = self._days[-1 - self.window : -1]
+        held = _direction(position)
+        if last_close > max(h for h, _, _ in previous) and held != 1:
+            return FxSignal(1, self.stop_pips, None, "日足の高値を上抜け")
+        if last_close < min(lo for _, lo, _ in previous) and held != -1:
+            return FxSignal(-1, self.stop_pips, None, "日足の安値を下抜け")
+        return None
