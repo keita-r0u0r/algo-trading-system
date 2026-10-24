@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -326,3 +327,35 @@ def test_warmup_bars_feed_strategy_but_do_not_trade():
     assert seen[:3] == [0, 1, 2]  # 助走の足も見ている
     # 助走中の判断は捨てる。最初の約定は、助走のあと最初の判断（足3）を足4の始値で
     assert result.trades[0].entry_at == data.index[4]
+
+
+def test_swap_from_columns_and_formula():
+    from jqbt.core.fx.model import swap_per_unit
+
+    long, short = swap_per_unit(158.0, 4.0, 1.5, markup=0.5)
+    assert long == pytest.approx(158 * 0.02 / 365) and short == pytest.approx(-158 * 0.03 / 365)
+    data = bars([(150, 150, 150, 150)] * 4, start="2025-01-10 23:58")
+    data["session"] = [pd.Timestamp("2025-01-10").date()] * 2 + [pd.Timestamp("2025-01-13").date()] * 2
+    data["swap_long"], data["swap_short"] = 0.02, -0.03
+    result = run_fx(data, Script({0: FxSignal(1)}), config(swap_long=0.0))
+    assert result.summary["final"] == pytest.approx(100_000 + 1_000 * 0.02 * 3)  # 列の値が使われる
+
+
+def test_carry_filter_trend_needs_positive_carry_and_uptrend():
+    from jqbt.application.fx_backtest import FxView
+    from jqbt.strategies.fx import CarryFilter
+
+    days = pd.bdate_range("2025-01-06", periods=60)
+    carry = pd.Series(1.0, index=days)
+    rule = CarryFilter(carry, "trend")
+    out = []
+    for k, day in enumerate(days):
+        price = 150.0 + k * 0.1  # 毎日上がる
+        for hhmm in ("09:00", "10:00"):
+            t = pd.Timestamp(f"{day.date()} {hhmm}")
+            view = FxView(0, t, np.array([price]), np.array([price]), np.array([price]), np.array([price]), 10)
+            s = rule.decide(view, FxPosition())
+            if s is not None:
+                out.append((k, s.target))
+    assert out and out[0][1] == 1 and out[0][0] == 50  # 50営業日分の終値（0〜49日目）がそろった翌朝
+    assert CarryFilter(-carry, "trend")._carry_before(days[10].date()) == -1.0

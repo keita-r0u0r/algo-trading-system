@@ -1,0 +1,36 @@
+# PR と main への push で、全テストを回す。
+# 秘密情報は使わない（J-Quants の実データに依存するテストは、データが無ければ飛ばす）
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev,gui,gcp,ai]"
+      - run: pytest -q
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.13.1
+      - name: OpenTofu の構成を検査する（GCP には触らない）
+        run: |
+          tofu -chdir=infra init -backend=false -input=false
+          tofu -chdir=infra fmt -check
+          tofu -chdir=infra validate
