@@ -373,7 +373,7 @@ resource "google_cloud_scheduler_job" "fx_paper" {
 
   name      = "${local.name}-fx-paper-hourly"
   region    = var.region
-  schedule  = "1 * * * 1-6" # 毎時1分。月〜土（土曜の朝まで市場が開いている）。閉まっていればスクリプトが何もしない
+  schedule  = var.fx_paper_schedule
   time_zone = "Asia/Tokyo"
   paused    = var.fx_paper_paused
 

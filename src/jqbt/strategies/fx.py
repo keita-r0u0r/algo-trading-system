@@ -314,3 +314,63 @@ class DailyBreakout:
         if last_close < min(lo for _, lo, _ in previous) and held != -1:
             return FxSignal(-1, self.stop_pips, None, "日足の安値を下抜け")
         return None
+
+
+class CarryFilter:
+    """受け取れる金利差（スワップ）がプラスの通貨を買って持つ。ただし条件が崩れたら降りる。毎朝9時に判断する。
+
+    「買って持つだけ」が4通貨ペアすべてでプラスだった（主に円安と金利差）。その弱点は、2024年8月のような
+    急な円高で大きく失うこと。そこを条件で避けられるかを試す。数値は結果を見る前に決めて固定した（2026-10-24）。
+
+      * ``trend``: 前の営業日の終値が、50営業日の終値の平均より上
+      * ``calm``:  直近20営業日の値動きの大きさ（終値の変化の標準偏差）が、過去120営業日の中央値以下
+
+    ``carry`` は日付ごとの「受け取れる金利差」（%。業者の取り分を引いた後）。その日より前の値だけを使う。
+    """
+
+    def __init__(self, carry, mode: str = "trend") -> None:
+        if mode not in ("trend", "calm"):
+            raise ValueError(mode)
+        self.mode = mode
+        self.name = f"carry_{mode}"
+        self._carry_dates = [d.date() for d in carry.index]
+        self._carry = np.asarray(carry.to_numpy(dtype=float))
+        self._closes: list[float] = []
+        self._session = None
+        self._last = None
+        self._decided_on = None
+
+    def _carry_before(self, day) -> float | None:
+        import bisect
+
+        k = bisect.bisect_left(self._carry_dates, day)
+        return float(self._carry[k - 1]) if k > 0 else None
+
+    def _ok(self) -> bool:
+        closes = np.asarray(self._closes)
+        if self.mode == "trend":
+            return len(closes) >= 50 and closes[-1] > closes[-50:].mean()
+        if len(closes) < 141:
+            return False
+        changes = np.diff(np.log(closes))
+        recent = changes[-20:].std()
+        history = [changes[k - 20 : k].std() for k in range(len(changes) - 120, len(changes) + 1)]
+        return recent <= float(np.median(history))
+
+    def decide(self, view: FxView, position: FxPosition) -> FxSignal | None:
+        t = view.time
+        session = (t - pd.Timedelta(hours=7)).date()
+        if session != self._session:
+            if self._session is not None and self._last is not None:
+                self._closes.append(self._last)
+            self._session = session
+        self._last = view.close[-1]
+        if t.hour != 9 or t.minute != 0 or self._decided_on == t.date():
+            return None
+        self._decided_on = t.date()
+        carry = self._carry_before(t.date())
+        want = 1 if carry is not None and carry > 0 and self._ok() else 0
+        held = _direction(position)
+        if want == held:
+            return None
+        return FxSignal(want, None, None, "金利差と条件がそろった" if want else "条件が崩れた")

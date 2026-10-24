@@ -111,6 +111,7 @@ def run_fx(bars: pd.DataFrame, strategy: FxStrategy, config: FxConfig = FxConfig
 
       * ``spread``  その足のスプレッド（pips）。無ければ ``config.costs.spread_pips`` で一定
       * ``session`` その足が属する営業日。無ければ時刻の日付。日をまたがない「1日」の区切りになる
+      * ``swap_long`` / ``swap_short`` その日のスワップ（円/通貨/日）。無ければ ``config`` の一定の値
     """
     inst, base_costs = config.instrument, config.costs
     o = bars["open"].to_numpy(dtype=float)
@@ -118,6 +119,8 @@ def run_fx(bars: pd.DataFrame, strategy: FxStrategy, config: FxConfig = FxConfig
     lo = bars["low"].to_numpy(dtype=float)
     c = bars["close"].to_numpy(dtype=float)
     spread = bars["spread"].to_numpy(dtype=float) if "spread" in bars else None
+    swaps = (bars["swap_long"].to_numpy(dtype=float), bars["swap_short"].to_numpy(dtype=float)) \
+        if "swap_long" in bars and "swap_short" in bars else None
     times = bars.index
     day_of = np.asarray(bars["session"]) if "session" in bars else np.array([t.date() for t in times])
     n = len(c)
@@ -161,7 +164,10 @@ def run_fx(bars: pd.DataFrame, strategy: FxStrategy, config: FxConfig = FxConfig
         if i > 0 and day_of[i] != day_of[i - 1]:
             if position.is_open:
                 days = max((pd.Timestamp(day_of[i]) - pd.Timestamp(day_of[i - 1])).days, 1)
-                rate = config.swap_long if position.is_long else config.swap_short
+                if swaps is not None:
+                    rate = swaps[0][i] if position.is_long else swaps[1][i]
+                else:
+                    rate = config.swap_long if position.is_long else config.swap_short
                 cash += abs(position.units) * rate * days
             day_start_equity = equity[i - 1]
 

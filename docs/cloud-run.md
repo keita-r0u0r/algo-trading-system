@@ -97,6 +97,7 @@ make infra-apply     # それを反映する
 ```hcl
 fx_paper_paused = true      # 1時間ごとの実行を止める
 fx_paper_risk   = "small"   # リスクの度合い（small / medium / max）
+fx_paper_schedule = "1 9-18 * * 1-5"   # 動かす時刻（cron、日本時間）。例は平日の9〜18時の毎時1分
 ```
 
 ジョブと画面は、同じバケットの `state/` を読み書きします。AI の利用記録（`ai_usage.jsonl`）は両方が書くので、

@@ -231,3 +231,14 @@ def size_units(risk: RiskProfile, equity: float, price: float, stop_pips: float 
     by_leverage = equity * risk.max_leverage / price
     units = float(int(min(by_risk, by_leverage)))
     return units if units >= inst.min_units else 0.0
+
+
+def swap_per_unit(price: float, base_rate: float, quote_rate: float, markup: float = 0.5) -> tuple[float, float]:
+    """1通貨・1日あたりのスワップ（円）の見積もり。返すのは (買い, 売り)。受け取りは正。
+
+    金利（%）の差から計算し、業者の取り分 ``markup``（%）を両側に引く。
+    例: 158円のドル円、米国 4% − 日本 1.5% − 0.5% → 買いは 158 × 2.0% ÷ 365 ≒ 0.0087円。
+    """
+    long = price * (base_rate - quote_rate - markup) / 100 / 365
+    short = -price * (base_rate - quote_rate + markup) / 100 / 365
+    return long, short

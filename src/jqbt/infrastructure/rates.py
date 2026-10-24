@@ -81,6 +81,37 @@ def fetch(client: httpx.Client | None = None, root: Path = ROOT) -> dict[str, pd
     return out
 
 
+#: 3か月物の短期金利（OECD、月次、%）。スワップの見積もりに使う（``swap_columns``）
+SHORT_RATES = {
+    "USD": "IR3TIB01USM156N",
+    "JPY": "IR3TIB01JPM156N",
+    "EUR": "IR3TIB01EZM156N",
+    "GBP": "IR3TIB01GBM156N",
+    "AUD": "IR3TIB01AUM156N",
+}
+
+
+def fetch_short(client: httpx.Client | None = None, root: Path = ROOT) -> dict[str, pd.Series]:
+    """5通貨の短期金利（月次）を取り込み、``short_<通貨>.csv`` に保存する。"""
+    http = client or httpx.Client(timeout=60, follow_redirects=True)
+    root.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for currency, series_id in SHORT_RATES.items():
+        response = http.get(FRED.format(series=series_id))
+        response.raise_for_status()
+        out[currency] = parse_fred(response.content)
+        out[currency].rename("rate").to_csv(root / f"short_{currency}.csv")
+    return out
+
+
+def short_rate_known(currency: str, days: pd.DatetimeIndex, root: Path = ROOT) -> pd.Series:
+    """各日に「分かっていた」短期金利。月 M の値は翌月の初めに出るので、M+1 月の日から使う。最新の値で埋める。"""
+    monthly = load(f"short_{currency}", root)
+    known = monthly.copy()
+    known.index = known.index + pd.offsets.MonthBegin(1)
+    return known.reindex(known.index.union(days)).sort_index().ffill().reindex(days)
+
+
 def load(name: str, root: Path = ROOT) -> pd.Series:
     path = root / f"{name}.csv"
     if not path.exists():
