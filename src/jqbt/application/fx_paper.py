@@ -235,3 +235,14 @@ def moves_after(bars: pd.DataFrame, at: pd.Timestamp, hours: tuple[int, ...] = (
         out[f"up_{h}h"] = round((float(window["high"].max()) - start) / pip, 1)
         out[f"down_{h}h"] = round((start - float(window["low"].min())) / pip, 1)
     return out
+
+
+def carry_trend_target(daily_closes: list[float], carry: float | None, window: int = 50) -> int:
+    """金利差＋流れ（``strategies.fx.CarryFilter`` の ``trend`` と同じ決まり）。+1 なら買って持つ、0 なら持たない。
+
+    ``daily_closes`` は終わった営業日の終値（古い順）。``carry`` は受け取れる金利差（%、取り分を引いた後）。
+    """
+    if carry is None or carry <= 0 or len(daily_closes) < window:
+        return 0
+    recent = daily_closes[-window:]
+    return 1 if daily_closes[-1] > sum(recent) / window else 0

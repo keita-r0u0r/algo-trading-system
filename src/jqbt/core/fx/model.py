@@ -233,7 +233,11 @@ def size_units(risk: RiskProfile, equity: float, price: float, stop_pips: float 
     return units if units >= inst.min_units else 0.0
 
 
-def swap_per_unit(price: float, base_rate: float, quote_rate: float, markup: float = 0.5) -> tuple[float, float]:
+#: 業者のスワップの取り分（%）の見積もり。検証（fx_multi）とペーパー運用で同じ値を使う
+SWAP_MARKUP = 0.5
+
+
+def swap_per_unit(price: float, base_rate: float, quote_rate: float, markup: float = SWAP_MARKUP) -> tuple[float, float]:
     """1通貨・1日あたりのスワップ（円）の見積もり。返すのは (買い, 売り)。受け取りは正。
 
     金利（%）の差から計算し、業者の取り分 ``markup``（%）を両側に引く。
