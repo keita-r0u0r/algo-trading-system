@@ -11,6 +11,10 @@
 | ``rule_hourly_breakout`` | 1時間足の突破（``HourlyBreakout`` と同じ決まり） |
 | ``buy_and_hold`` | ドル円を買って持つ（損切り100 pips。掛かったら次の回に買い直す） |
 | ``no_trade`` | 一切売買しない |
+| ``carry_trend_<通貨ペア>`` | 金利差＋流れ（``CarryFilter`` の trend と同じ決まり）を4通貨ペアで。過去の検証で一番有力だった候補を、
+  同じ数値のまま新しいデータで確かめる。1回100通貨・損切り150 pips（検証と同じ大きさ） |
+
+スワップは、各通貨の短期金利の差から見積もる（検証と同じ。取り分0.5%）。
 
 AI を使うには、拡張パーツ ``ai`` を有効にする（``JQBT_EXTENSIONS=ai``）。無ければ AI の口座は飛ばす。
 枠（``core.fx.frame``）を外れた判断は実行せず、理由と一緒に記録する。
@@ -33,12 +37,13 @@ import pandas as pd  # noqa: E402
 from jqbt.application.fx_paper import (  # noqa: E402
     PaperAccount,
     advance,
+    carry_trend_target,
     execute,
     hourly_breakout_target,
     mark,
 )
 from jqbt.core.fx.frame import TradingFrame, check  # noqa: E402
-from jqbt.core.fx.model import RISK_PROFILES, FxCosts, FxInstrument  # noqa: E402
+from jqbt.core.fx.model import RISK_PROFILES, SWAP_MARKUP, FxCosts, FxInstrument, swap_per_unit  # noqa: E402
 from jqbt.infrastructure import fx_paper_log, rates  # noqa: E402
 from jqbt.infrastructure.env import load_env  # noqa: E402
 from jqbt.infrastructure.gmo_fx import GmoFxClient  # noqa: E402
@@ -50,11 +55,45 @@ STATE = Path(__file__).resolve().parents[1] / "state"
 KILL = STATE / "KILL_fx_paper"
 BASE = "USD_JPY"
 SYMBOLS = ("USD_JPY", "EUR_JPY", "GBP_JPY", "AUD_JPY")
-ACCOUNTS = ("ai", "rule_hourly_breakout", "buy_and_hold", "no_trade")
+CARRY_ACCOUNTS = {f"carry_trend_{sym}": sym for sym in SYMBOLS}
+ACCOUNTS = ("ai", "rule_hourly_breakout", "buy_and_hold", "no_trade", *CARRY_ACCOUNTS)
 INITIAL = 10_000.0
-#: スワップ（円/通貨/日）。**仮定**（fx_real.py と同じ）。日をまたいで持つ建玉にだけ効く
-SWAP_LONG, SWAP_SHORT = 0.012, -0.013
+#: 金利差＋流れの口座の大きさ。検証（fx_multi）と同じ 100通貨・損切り150 pips にするため、
+#: 1回の損切りで資金の1.5%（1万円 × 1.5% ÷ (150 pips × 0.01円) = 100通貨）。枠は「最大」の度合いで確かめる
+CARRY_RISK, CARRY_STOP = 0.015, 150
 COSTS = FxCosts(slippage_pips=0.1, stop_slippage_pips=0.3, fee_rate=0.00002, losscut_fee=0.05)
+
+
+def short_rates(today: dt.date) -> dict[str, float]:
+    """各通貨の短期金利（%）。今日より前に分かっていた値。1日1回だけ取り込み直す。"""
+    root = STATE / "rates"
+    stamp = root / "short_fetched_on"
+    try:
+        if not stamp.exists() or stamp.read_text() != today.isoformat():
+            rates.fetch_short(root=root)
+            stamp.write_text(today.isoformat())
+        day = pd.DatetimeIndex([pd.Timestamp(today)])
+        return {c: float(rates.short_rate_known(c, day, root).iloc[0]) for c in rates.SHORT_RATES}
+    except Exception:  # 金利が取れなくても、他は進める（スワップ0、金利差の口座は判断しない）
+        return {}
+
+
+def swap_for(symbol: str, price: float, short: dict[str, float]) -> tuple[float, float]:
+    base, quote = symbol.split("_")
+    if base not in short or quote not in short:
+        return 0.0, 0.0
+    return swap_per_unit(price, short[base], short[quote], SWAP_MARKUP)
+
+
+def daily_closes(api: GmoFxClient, symbol: str, now: dt.datetime) -> list[float]:
+    """終わった営業日の終値（仲値、古い順、直近2年）。今日のまだ終わっていない日は含めない。"""
+    closes: dict[int, float] = {}
+    for year in (now.year - 1, now.year):
+        bid = {int(b["openTime"]): float(b["close"]) for b in api.klines(symbol, "1day", str(year), "BID")}
+        ask = {int(b["openTime"]): float(b["close"]) for b in api.klines(symbol, "1day", str(year), "ASK")}
+        closes.update({t: (bid[t] + ask[t]) / 2 for t in bid if t in ask})
+    done_before = (now - dt.timedelta(hours=24)).timestamp() * 1000
+    return [closes[t] for t in sorted(closes) if t <= done_before]
 
 
 def instruments(api: GmoFxClient) -> dict[str, FxInstrument]:
@@ -184,6 +223,7 @@ def main() -> int:
         return 0
 
     frame = TradingFrame(symbols=SYMBOLS, risk=RISK_PROFILES[args.risk])
+    carry_frame = TradingFrame(symbols=SYMBOLS, risk=RISK_PROFILES["max"])
     insts = instruments(api)
     quotes = {}
     for t in api.ticker():
@@ -199,10 +239,13 @@ def main() -> int:
     new_events: list[dict] = []
     ai = build_ai()
     today_rates = rates_summary(now.date()) if ai is not None else {}
+    short = short_rates(now.date())
     for name, account in accounts.items():
+        account_frame = carry_frame if name in CARRY_ACCOUNTS else frame
         symbol = account.position.symbol if account.position else BASE
-        step = advance(account, bars[symbol], COSTS, insts[symbol], daily_loss_limit=frame.risk.daily_loss_limit,
-                       swap_long=SWAP_LONG, swap_short=SWAP_SHORT)
+        swap_long, swap_short = swap_for(symbol, quotes[symbol]["bid"], short)
+        step = advance(account, bars[symbol], COSTS, insts[symbol], daily_loss_limit=account_frame.risk.daily_loss_limit,
+                       swap_long=swap_long, swap_short=swap_short)
         account = step.account
         new_events += step.events
         if account.stopped:
@@ -236,6 +279,17 @@ def main() -> int:
                 decisions.append(({"action": "open_long" if want > 0 else "open_short", "symbol": BASE,
                                    "risk_fraction": frame.risk.risk_per_trade, "stop_pips": 50, "take_pips": 0},
                                   "1時間足の突破", {}))
+        elif name in CARRY_ACCOUNTS:
+            sym = CARRY_ACCOUNTS[name]
+            base, quote = sym.split("_")
+            carry = short[base] - short[quote] - SWAP_MARKUP if base in short and quote in short else None
+            want = carry_trend_target(daily_closes(api, sym, now), carry)
+            if want == 1 and account.position is None:
+                decisions.append(({"action": "open_long", "symbol": sym, "risk_fraction": CARRY_RISK,
+                                   "stop_pips": CARRY_STOP, "take_pips": 0},
+                                  f"金利差 {carry:+.2f}% と上向きの流れ", {"carry": carry}))
+            elif want == 0 and account.position is not None:
+                decisions.append(({"action": "close"}, "金利差か流れの条件が崩れた", {"carry": carry}))
         elif name == "buy_and_hold" and account.position is None:
             decisions.append(({"action": "open_long", "symbol": BASE, "risk_fraction": frame.risk.risk_per_trade,
                                "stop_pips": 100, "take_pips": 0}, "買って持つ", {}))
@@ -244,7 +298,7 @@ def main() -> int:
             equity = mark(account, quotes[account.position.symbol]["bid"], quotes[account.position.symbol]["ask"]) \
                 if account.position else account.cash
             approved, rejected = check(
-                decision, frame, equity=equity, holding=account.position.symbol if account.position else None,
+                decision, account_frame, equity=equity, holding=account.position.symbol if account.position else None,
                 spread_pips={s: q["spread"] for s, q in quotes.items()}, prices={s: q["ask"] for s, q in quotes.items()},
                 instruments=insts, halted=halted_all or account.halted_session == account.session,
             )

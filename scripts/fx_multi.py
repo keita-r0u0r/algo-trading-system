@@ -34,7 +34,7 @@ import pandas as pd  # noqa: E402
 import fx_real  # noqa: E402
 from jqbt.core.selection import expected_max_sharpe  # noqa: E402
 from jqbt.application.fx_backtest import run_fx  # noqa: E402
-from jqbt.core.fx.model import swap_per_unit  # noqa: E402
+from jqbt.core.fx.model import SWAP_MARKUP, swap_per_unit  # noqa: E402
 from jqbt.infrastructure import experiment_log, rates  # noqa: E402
 from jqbt.infrastructure.gmo_fx_store import load  # noqa: E402
 from jqbt.strategies.fx import (  # noqa: E402
@@ -47,7 +47,7 @@ from jqbt.strategies.fx import (  # noqa: E402
 )
 
 #: 業者のスワップの取り分（%）。結果を見る前に決めた
-MARKUP = 0.5
+MARKUP = SWAP_MARKUP
 #: 候補の組（名前 → (作り方, 日をまたぐか)）。作り方は、その通貨ペアの金利差（%）を受け取る
 SETS = {
     # 値動きだけのルール。数値はドル円で決めたものを変えない

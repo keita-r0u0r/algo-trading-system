@@ -134,3 +134,13 @@ def test_moves_after_reports_change_and_extremes():
     bars.loc[index[59], "close"] = 157.9
     moves = moves_after(bars, index[0], hours=(1, 4))
     assert moves == {"change_1h": -10.0, "up_1h": 25.0, "down_1h": 0.0}  # 4時間後はデータが無いので含めない
+
+
+def test_carry_trend_target_matches_rule():
+    from jqbt.application.fx_paper import carry_trend_target
+
+    up = [150 + k * 0.1 for k in range(60)]
+    assert carry_trend_target(up, 1.0) == 1
+    assert carry_trend_target(up, -0.2) == 0  # 金利差がマイナスなら持たない
+    assert carry_trend_target(list(reversed(up)), 1.0) == 0  # 下り坂なら持たない
+    assert carry_trend_target(up[:49], 1.0) == 0  # 50日に満たない
