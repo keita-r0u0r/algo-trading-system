@@ -58,9 +58,16 @@ SYMBOLS = ("USD_JPY", "EUR_JPY", "GBP_JPY", "AUD_JPY")
 CARRY_ACCOUNTS = {f"carry_trend_{sym}": sym for sym in SYMBOLS}
 ACCOUNTS = ("ai", "rule_hourly_breakout", "buy_and_hold", "no_trade", *CARRY_ACCOUNTS)
 INITIAL = 10_000.0
-#: 金利差＋流れの口座の大きさ。検証（fx_multi）と同じ 100通貨・損切り150 pips にするため、
-#: 1回の損切りで資金の1.5%（1万円 × 1.5% ÷ (150 pips × 0.01円) = 100通貨）。枠は「最大」の度合いで確かめる
-CARRY_RISK, CARRY_STOP = 0.015, 150
+#: 前回の実行から間が空いたとき、さかのぼって確かめる最大の日数。これより古い足は見ない（記録に残す）
+MAX_GAP_DAYS = 14
+#: 金利差＋流れ・買って持つだけの口座は、検証（fx_multi）と同じく、資金が増減しても1回100通貨で持つ。
+#: 1万円で損切り150 pips なら、1回の損切りで資金の1.5%。枠は「最大」の度合い（上限2.5%）で確かめる
+FIXED_UNITS, CARRY_STOP, HOLD_STOP = 100, 150, 100
+
+
+def risk_for_units(units: float, stop_pips: float, equity: float, pip: float = 0.01) -> float:
+    """決まった数量になるリスクの割合（損切りに掛かったとき、資金の何割を失うか）。"""
+    return units * stop_pips * pip / equity if equity > 0 else 0.0
 COSTS = FxCosts(slippage_pips=0.1, stop_slippage_pips=0.3, fee_rate=0.00002, losscut_fee=0.05)
 
 
@@ -230,10 +237,17 @@ def main() -> int:
         if t["symbol"] in insts:
             bid, ask = float(t["bid"]), float(t["ask"])
             quotes[t["symbol"]] = {"bid": bid, "ask": ask, "spread": (ask - bid) / 0.01}
-    # 1日の損失や、前回からの損切りの確認に要る分（最大4日前まで）。AI には全通貨ペアの直近を見せる
-    oldest = min((pd.Timestamp(a.last_time).date() for a in accounts.values() if a.last_time), default=now.date())
-    days_back = min(max((now.date() - oldest).days + 1, 3), 4)
-    bars = {sym: recent_bars(api, sym, now, days_back) for sym in insts}
+    # AI には全通貨ペアの直近3日を見せる。建玉のある通貨ペアは、前回の実行から今までの足を全部確かめる
+    # （週末や停止のあとに間が空いても、そのあいだの損切りを見逃さない。最大 MAX_GAP_DAYS 日）
+    held_since: dict[str, dt.date] = {}
+    for a in accounts.values():
+        if a.position is not None and a.last_time:
+            day = pd.Timestamp(a.last_time).date()
+            held_since[a.position.symbol] = min(day, held_since.get(a.position.symbol, day))
+    bars = {}
+    for sym in insts:
+        gap = (now.date() - held_since[sym]).days + 1 if sym in held_since else 0
+        bars[sym] = recent_bars(api, sym, now, min(max(gap, 3), MAX_GAP_DAYS))
     halted_all = KILL.exists()
 
     new_events: list[dict] = []
@@ -241,7 +255,7 @@ def main() -> int:
     today_rates = rates_summary(now.date()) if ai is not None else {}
     short = short_rates(now.date())
     for name, account in accounts.items():
-        account_frame = carry_frame if name in CARRY_ACCOUNTS else frame
+        account_frame = carry_frame if name in CARRY_ACCOUNTS or name == "buy_and_hold" else frame
         symbol = account.position.symbol if account.position else BASE
         swap_long, swap_short = swap_for(symbol, quotes[symbol]["bid"], short)
         step = advance(account, bars[symbol], COSTS, insts[symbol], daily_loss_limit=account_frame.risk.daily_loss_limit,
@@ -285,14 +299,16 @@ def main() -> int:
             carry = short[base] - short[quote] - SWAP_MARKUP if base in short and quote in short else None
             want = carry_trend_target(daily_closes(api, sym, now), carry)
             if want == 1 and account.position is None:
-                decisions.append(({"action": "open_long", "symbol": sym, "risk_fraction": CARRY_RISK,
+                decisions.append(({"action": "open_long", "symbol": sym,
+                                   "risk_fraction": risk_for_units(FIXED_UNITS, CARRY_STOP, account.cash),
                                    "stop_pips": CARRY_STOP, "take_pips": 0},
                                   f"金利差 {carry:+.2f}% と上向きの流れ", {"carry": carry}))
             elif want == 0 and account.position is not None:
                 decisions.append(({"action": "close"}, "金利差か流れの条件が崩れた", {"carry": carry}))
         elif name == "buy_and_hold" and account.position is None:
-            decisions.append(({"action": "open_long", "symbol": BASE, "risk_fraction": frame.risk.risk_per_trade,
-                               "stop_pips": 100, "take_pips": 0}, "買って持つ", {}))
+            decisions.append(({"action": "open_long", "symbol": BASE,
+                               "risk_fraction": risk_for_units(FIXED_UNITS, HOLD_STOP, account.cash),
+                               "stop_pips": HOLD_STOP, "take_pips": 0}, "買って持つ", {}))
 
         for decision, reason, extra in decisions:
             equity = mark(account, quotes[account.position.symbol]["bid"], quotes[account.position.symbol]["ask"]) \
