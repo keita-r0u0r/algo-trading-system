@@ -452,10 +452,16 @@ def page_fx_live() -> None:
         st.info("まだ記録がありません。ペーパー運用と一緒に15分ごとに読みます（手元では scripts/fx_live_sync.py）",
                 icon=":material/hourglass_empty:")
         return
-    errors = [e for e in events if e.get("kind") == "error"]
-    if errors:
-        st.warning("読めなかったものがあります（最後の回）: " + " / ".join(errors[-1]["errors"])
-                   + "。ERR-5012 は、APIキーの照会の権限が足りないときに出ます（GMOコインの API キーの設定で、約定・建玉の照会を許可する。注文の権限は要りません）",
+    # 警告は、最後の回（最後の snapshot と同じ時刻）にエラーがあったときだけ出す
+    last_at = next((e.get("at") for e in reversed(events) if e.get("kind") == "snapshot"), None)
+    latest_errors = [x for e in events if e.get("kind") == "error" and e.get("at") == last_at for x in e["errors"]]
+    if latest_errors:
+        hints = []
+        if any("ERR-5003" in x for x in latest_errors):
+            hints.append("ERR-5003 は照会の呼びすぎ（一時的。次の回で読み直す）")
+        if any("ERR-5012" in x for x in latest_errors):
+            hints.append("ERR-5012 は APIキーの権限か IP の制限で弾かれている（GMOコインの API キーの設定を確かめる）")
+        st.warning("最後の回で読めなかったもの: " + " / ".join(latest_errors) + ("。" + " ".join(hints) if hints else ""),
                    icon=":material/lock:")
     snapshots = [e for e in events if e.get("kind") == "snapshot"]
     last = snapshots[-1] if snapshots else {}
