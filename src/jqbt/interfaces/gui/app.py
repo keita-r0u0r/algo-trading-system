@@ -431,6 +431,7 @@ if page == "FX ペーパー":
             equity = state.get("equity") or state["cash"]
             rows.append({
                 "口座": name,
+                "種類": "AI" if name == "ai" else ("基準" if name in ("buy_and_hold", "no_trade") else "機械"),
                 "評価額": round(equity),
                 "損益": f"{equity / state['initial'] - 1:+.2%}",
                 "建玉": f"{position['symbol']} {position['units']:+,.0f}" if position else "—",
@@ -450,19 +451,73 @@ if page == "FX ペーパー":
                 .properties(height=280)
             )
             st.altair_chart(chart, width="stretch")
-        st.subheader("最近の判断と約定")
-        recent = [e for e in events if e.get("kind") in ("decision", "open", "close", "halted", "stopped")][-50:]
-        st.dataframe(pd.DataFrame([{
-            "時刻": e.get("at"), "口座": e.get("account"), "種類": e.get("kind"),
-            "中身": (e.get("decision") or {}).get("action") if e.get("kind") == "decision"
-            else f"{e.get('symbol', '')} {e.get('units', 0):+,.0f}",
-            "結果・理由": ("通過" if e.get("approved") else e.get("rejected") or e.get("error") or "見送り")
-            if e.get("kind") == "decision" else (f"{e['pnl']:+,.0f}円 " if "pnl" in e else "") + str(e.get("reason", "")),
-            "AI": e.get("model", ""),
-            "確信度": (e.get("decision") or {}).get("confidence", ""),
-            "根拠": (e.get("decision") or {}).get("reasoning", "")
-            or ", ".join(f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")),
-        } for e in reversed(recent)]), hide_index=True, width="stretch")
+        def kind_of(account: str) -> str:
+            if account == "ai":
+                return "AI"
+            return "基準" if account in ("buy_and_hold", "no_trade") else "機械"
+
+        def result_of(e: dict) -> str:
+            return "通過" if e.get("approved") else (e.get("rejected") or e.get("error") or "見送り")
+
+        decisions = [e for e in events if e.get("kind") == "decision"]
+        ai_tab, rule_tab, fill_tab = st.tabs(["AI の判断", "機械（ルール）の判断", "約定と手仕舞い"])
+        with ai_tab:
+            ai_rows = [{
+                "時刻": e.get("at", "")[:16].replace("T", " "),
+                "判断": (e.get("decision") or {}).get("action", "エラー" if "error" in e else ""),
+                "通貨": (e.get("decision") or {}).get("symbol", ""),
+                "リスク": (e.get("decision") or {}).get("risk_fraction"),
+                "損切り": (e.get("decision") or {}).get("stop_pips"),
+                "利確": (e.get("decision") or {}).get("take_pips"),
+                "確信度": (e.get("decision") or {}).get("confidence", ""),
+                "結果": result_of(e),
+                "根拠": (e.get("decision") or {}).get("reasoning", "") or e.get("error", ""),
+                "前提文": e.get("prompt_version") or "fx-v1",
+                "モデル": e.get("model", ""),
+            } for e in reversed(decisions) if e.get("account") == "ai"][:100]
+            if ai_rows:
+                counts = pd.Series([r["判断"] for r in ai_rows]).value_counts()
+                st.caption("直近の判断の内訳: " + " / ".join(f"{k} {v}" for k, v in counts.items()))
+                st.dataframe(pd.DataFrame(ai_rows), hide_index=True, width="stretch")
+            else:
+                st.caption("まだありません")
+        with rule_tab:
+            rule_rows = []
+            for e in reversed(decisions):
+                if e.get("account") == "ai":
+                    continue
+                logic = e.get("logic") or {}
+                rule_rows.append({
+                    "時刻": e.get("at", "")[:16].replace("T", " "),
+                    "口座": e.get("account"),
+                    "種類": kind_of(e.get("account", "")),
+                    "判断": (e.get("decision") or {}).get("action", ""),
+                    "結果": result_of(e),
+                    "見た数字": ", ".join(f"{k}={v}" for k, v in logic.items() if k not in ("rule", "version")),
+                    "版": logic.get("version", ""),
+                })
+            rule_rows = rule_rows[:200]
+            if rule_rows:
+                st.dataframe(pd.DataFrame(rule_rows), hide_index=True, width="stretch")
+                with st.expander("各ルールの決まり"):
+                    seen = {}
+                    for e in decisions:
+                        if (e.get("logic") or {}).get("rule"):
+                            seen[e["account"]] = e["logic"]["rule"]
+                    for account, rule in seen.items():
+                        st.markdown(f"- **{account}**: {rule}")
+            else:
+                st.caption("まだありません")
+        with fill_tab:
+            fills = [e for e in events if e.get("kind") in ("open", "close", "halted", "stopped")]
+            st.dataframe(pd.DataFrame([{
+                "時刻": e.get("at", "")[:16].replace("T", " "), "口座": e.get("account"),
+                "種類": {"open": "建てた", "close": "閉じた", "halted": "1日の上限で停止", "stopped": "ロスカット"}[e["kind"]],
+                "通貨": e.get("symbol", ""), "数量": e.get("units"),
+                "値段": round(e.get("price", e.get("exit_price", 0)) or 0, 3),
+                "損益": round(e["pnl"]) if "pnl" in e else None,
+                "理由": str(e.get("reason", ""))[:120],
+            } for e in reversed(fills)][:200]), hide_index=True, width="stretch")
         st.caption("判断のあとの値動きと根拠の照らし合わせは scripts/fx_paper_review.py。値動きは結果論なので、傾向を見る")
 
 # ----------------------------------------------------------------------
