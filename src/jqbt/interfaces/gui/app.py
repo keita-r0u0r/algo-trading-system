@@ -27,6 +27,7 @@ from jqbt.infrastructure.ledger import Ledger, kill_path, path_for
 from jqbt.infrastructure.secrets import SECRETS, SecretError, build_secrets
 from jqbt.interfaces import viewmodels as vm
 from jqbt.interfaces.composition import DataRequest, load_panel
+from jqbt.application.fx_live_trade import LiveConfig
 from jqbt.interfaces.extensions import GuiContext, enabled_names, load
 from jqbt.strategies import REGISTRY
 from jqbt.strategies.fx import BollingerRevert, EmaCross, RandomFx, RangeBreakout
@@ -299,7 +300,7 @@ def account_rows(events: list[dict], prices: dict[str, dict[str, float]] | None 
     return rows
 
 
-def page_home() -> None:
+def _old_page_home() -> None:
     header("概要", "FX のペーパー運用（仮想の約定）の今と、システムの状態")
     live(home_body)()
 
@@ -373,8 +374,8 @@ def paper_switch() -> None:
     with left:
         st.markdown(pill("ペーパー運用: 動いている", "ok") if running else pill("ペーパー運用: 止めている", "warn"),
                     unsafe_allow_html=True)
-        st.caption("止めている間は、15分ごとの回で判断も仮想の約定もしません。自動売買も新しく建てません"
-                   "（実際の口座の照会と記録は続け、持っている建玉は GMOコイン側の損切りで守られます）")
+        st.caption("止めている間は、15分ごとの回でペーパーの口座の判断も仮想の約定もしません。"
+                   "実際の売買（自動売買）には影響しません")
     with right:
         if running:
             if st.button("ペーパー運用を止める", icon=":material/pause:", width="stretch"):
@@ -614,8 +615,8 @@ def fx_live_controls() -> None:
             (pill("注文を出す設定", "ok") if enabled else pill("注文を出さない設定（記録だけ）", "info")) + " " +
             (pill("キルスイッチ: 入", "bad") if kill.exists() else pill("キルスイッチ: 切", "ok")),
             unsafe_allow_html=True)
-        st.caption("まねる口座: AI・金利差＋流れ（ドル円）。1口座100通貨まで、損切りは GMOコイン側に置く。"
-                   "注文を出す設定は infra の fx_live_enabled（画面の Cloud Run では表示だけ）")
+        st.caption("実際に売買する判断する者: AI・金利差＋流れ（ドル円）。実際の口座の状態を見て判断し、1口座100通貨まで、"
+                   "損切りは GMOコイン側に置く。ペーパー運用とは独立。注文を出す設定は infra の fx_live_enabled")
         if kill.exists():
             st.caption(kill.read_text(encoding="utf-8"))
     with c2:
@@ -647,6 +648,267 @@ def fx_live_trades() -> None:
             } for e in reversed(live_events)][:100]), hide_index=True, width="stretch")
         else:
             st.caption("まだありません")
+
+
+# ----------------------------------------------------------------------
+# 実運用 / ペーパーの切り替え（画面の上の「口座」）
+# ----------------------------------------------------------------------
+VENUES = {"実運用": "live", "ペーパー": "paper"}
+KILL_LIVE = ROOT / "state" / "KILL_fx_live"
+
+
+def venue() -> str:
+    return VENUES.get(st.session_state.get("venue", "実運用"), "live")
+
+
+def venue_header(title: str, live_text: str, paper_text: str) -> None:
+    is_live = venue() == "live"
+    header(title, live_text if is_live else paper_text)
+    st.markdown(pill("実運用（実際のお金）", "bad") if is_live else pill("ペーパー（シミュレーション）", "info"),
+                unsafe_allow_html=True)
+
+
+def live_log() -> list[dict]:
+    from jqbt.infrastructure import fx_live_log
+
+    return fx_live_log.load()
+
+
+def live_assets(snapshot: dict) -> dict:
+    a = snapshot.get("assets")
+    return (a[0] if isinstance(a, list) and a else a) or {}
+
+
+def position_accounts(events: list[dict]) -> dict[int, str]:
+    """建玉ID → その建玉を建てた判断する者。"""
+    return {int(e["position_id"]): e["account"] for e in events
+            if e.get("kind") == "live_open" and e.get("position_id")}
+
+
+def live_positions(events: list[dict], prices: dict) -> list[dict]:
+    """GMOコインの今の建玉（最後の照会）を、今の値段で評価し直す。"""
+    from jqbt.application.fx_live_trade import book_from_events
+
+    snapshots = [e for e in events if e.get("kind") == "snapshot"]
+    positions = (snapshots[-1].get("positions") if snapshots else None) or []
+    owners = position_accounts(events)
+    book = {p.position_id: p for p in book_from_events(events).values()}
+    rows = []
+    for p in positions:
+        pid, symbol, side = int(p["positionId"]), p["symbol"], p["side"]
+        size, price = float(p["size"]), float(p["price"])
+        q = prices.get(symbol)
+        now = (q["bid"] if side == "BUY" else q["ask"]) if q else None
+        sign = 1 if side == "BUY" else -1
+        unrealized = (now - price) * size * sign if now is not None else float(p.get("lossGain") or 0)
+        mine = book.get(pid)
+        rows.append({"判断する者": vm.account_label(owners.get(pid, "")) or "（手で建てた）",
+                     "通貨": vm.PAIR_LABELS.get(symbol, symbol), "売買": "買い" if side == "BUY" else "売り",
+                     "数量": size, "建値": price, "今の値段": now, "含み損益": round(unrealized),
+                     "損切り": mine.stop if mine else None, "利確": mine.take if mine else None,
+                     "スワップ": float(p.get("totalSwap") or 0)})
+    return rows
+
+
+def live_closed(events: list[dict]) -> list[dict]:
+    """決済した約定（確定した損益つき）。"""
+    owners = position_accounts(events)
+    rows = []
+    for e in events:
+        if e.get("kind") == "execution" and e.get("settleType") == "CLOSE":
+            pnl = float(e.get("lossGain") or 0) + float(e.get("settledSwap") or 0) - float(e.get("fee") or 0)
+            rows.append({"at": e["at"], "account": owners.get(int(e.get("positionId") or 0), ""), "pnl": pnl})
+    return rows
+
+
+def auto_trading_pills() -> str:
+    enabled = os.environ.get("FX_LIVE_ENABLED", "").lower() == "true"
+    return " ".join([
+        pill("自動売買: ON", "ok") if enabled and not KILL_LIVE.exists() else pill("自動売買: 止めている", "warn"),
+        pill("キルスイッチ: 入", "bad") if KILL_LIVE.exists() else pill("キルスイッチ: 切", "ok"),
+        pill("ペーパー: 止めている", "warn") if PAUSE_PAPER.exists() else pill("ペーパー: 動いている", "info"),
+    ])
+
+
+def page_overview() -> None:
+    venue_header("概要", "GMOコインの実際の口座。評価額・建玉・取引と、自動売買の状態",
+                 "ペーパー運用（シミュレーション）の口座。実際のお金は動きません")
+    live(live_overview if venue() == "live" else home_body)()
+
+
+def live_overview() -> None:
+    prices = quotes()
+    price_strip(prices)
+    events = live_log()
+    snapshots = [e for e in events if e.get("kind") == "snapshot" and live_assets(e)]
+    if not snapshots:
+        st.info("まだ口座を読んだ記録がありません（15分ごとに読みます）", icon=":material/hourglass_empty:")
+        return
+    last = live_assets(snapshots[-1])
+    positions = live_positions(events, prices)
+    balance = float(last.get("balance") or last.get("equity") or 0)
+    equity_now = balance + sum(r["含み損益"] for r in positions) if positions else float(last.get("equity") or 0)
+    today = [live_assets(e) for e in snapshots if e["at"].startswith(dt.date.today().isoformat())]
+    day_start = float(today[0].get("equity")) if today else equity_now
+    closed = live_closed(events)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("評価額（今の値段）", f"{equity_now:,.0f} 円", f"今日 {equity_now - day_start:+,.0f} 円")
+    c2.metric("確定した損益（累計）", f"{sum(r['pnl'] for r in closed):+,.0f} 円", f"決済 {len(closed)} 件",
+              delta_color="off", delta_arrow="off")
+    c3.metric("建玉", f"{len(positions)} 件", f"含み損益 {sum(r['含み損益'] for r in positions):+,} 円",
+              delta_color="off", delta_arrow="off")
+    ratio = float(last.get("marginRatio") or 0)
+    c4.metric("取引余力", f"{float(last.get('availableAmount') or 0):,.0f} 円",
+              f"証拠金維持率 {ratio:,.0f}%" if positions and 0 < ratio < 1e6 else "証拠金維持率 —（建玉なし）",
+              delta_color="off", delta_arrow="off")
+    st.markdown(auto_trading_pills(), unsafe_allow_html=True)
+
+    left, right = st.columns([3, 2], gap="large")
+    with left, st.container(border=True):
+        st.markdown("**評価額の推移**")
+        # 入金する前（評価額0）の記録は、グラフに入れない
+        curve = pd.DataFrame([{"時刻": pd.Timestamp(e["at"]), "評価額": float(live_assets(e).get("equity") or 0)}
+                              for e in snapshots if float(live_assets(e).get("equity") or 0) > 0])
+        curve = pd.concat([curve, pd.DataFrame([{"時刻": pd.Timestamp(dt.datetime.now(JST)), "評価額": equity_now}])])
+        if len(curve) > 1:
+            st.altair_chart(alt.Chart(curve).mark_line(strokeWidth=2.5, point=True)
+                            .encode(x=alt.X("時刻:T", title=None),
+                                    y=alt.Y("評価額:Q", scale=alt.Scale(zero=False), title=None))
+                            .properties(height=280), width="stretch")
+    with right, st.container(border=True):
+        st.markdown("**建玉**")
+        if positions:
+            st.dataframe(pd.DataFrame(positions)[["判断する者", "通貨", "売買", "数量", "建値", "含み損益"]],
+                         hide_index=True, width="stretch",
+                         column_config={"含み損益": st.column_config.NumberColumn(format="%+d 円")})
+        else:
+            st.caption("持っていません")
+    with st.container(border=True):
+        st.markdown("**最近の動き**")
+        activity = [e for e in events if e.get("kind") in ("live_open", "live_close", "live_gone", "live_fatal",
+                                                              "live_error", "live_skip")
+                    or (e.get("kind") == "live_decision" and (e.get("decision") or {}).get("action") not in ("hold", None))][-10:]
+        if not activity:
+            st.caption("まだありません")
+        labels = {"live_open": ("建てた", "ok"), "live_close": ("決済した", "info"), "live_gone": ("GMO側で決済", "info"),
+                  "live_fatal": ("致命的な損失を防いだ", "bad"), "live_error": ("エラー", "bad"),
+                  "live_skip": ("見送り", "warn"), "live_decision": ("判断", "info")}
+        for e in reversed(activity):
+            text, kind = labels[e["kind"]]
+            detail = e.get("reason") or e.get("error") or e.get("note") or ""
+            if e["kind"] == "live_open":
+                detail = f"{vm.PAIR_LABELS.get(e.get('symbol'), e.get('symbol'))} {e.get('side')} {e.get('size')} @ {e.get('price')}"
+            if e["kind"] == "live_decision":
+                d = e.get("decision") or {}
+                detail = f"{d.get('action')} {d.get('symbol', '')} → {'通過' if e.get('approved') else e.get('rejected')}"
+            st.markdown(f"{pill(text, kind)} `{e['at'][5:16].replace('T', ' ')}` **{vm.account_label(e.get('account', ''))}** "
+                        f"<span style='color:#64748b;font-size:.85rem'>{detail[:140]}</span>", unsafe_allow_html=True)
+
+
+def page_trades() -> None:
+    venue_header("取引履歴", "GMOコインの実際の約定（手数料・スワップ・ずれつき）", "ペーパー運用の仮想の約定")
+    live(live_trades if venue() == "live" else paper_trades)()
+
+
+def live_trades() -> None:
+    events = live_log()
+    owners = position_accounts(events)
+    rows = [{"時刻": e["at"][5:16].replace("T", " "),
+             "判断する者": vm.account_label(owners.get(int(e.get("positionId") or 0), "")) or "（手で建てた）",
+             "通貨": vm.PAIR_LABELS.get(e.get("symbol"), e.get("symbol")), "売買": "買い" if e.get("side") == "BUY" else "売り",
+             "新規/決済": "新規" if e.get("settleType") == "OPEN" else "決済", "数量": float(e.get("size") or 0),
+             "値段": float(e.get("price") or 0), "損益": float(e.get("lossGain") or 0), "手数料": float(e.get("fee") or 0),
+             "スワップ": float(e.get("settledSwap") or 0), "ずれ（pips）": e.get("slippage_pips")}
+            for e in events if e.get("kind") == "execution"]
+    if not rows:
+        st.info("まだ約定はありません", icon=":material/hourglass_empty:")
+        return
+    st.dataframe(pd.DataFrame(list(reversed(rows))), hide_index=True, width="stretch",
+                 column_config={"損益": st.column_config.NumberColumn(format="%+.0f 円")})
+
+
+def paper_trades() -> None:
+    events = fx_events()
+    fills = [e for e in events if e.get("kind") in ("open", "close")]
+    if not fills:
+        st.info("まだ仮想の約定はありません", icon=":material/hourglass_empty:")
+        return
+    st.dataframe(pd.DataFrame([{
+        "時刻": e.get("at", "")[5:16].replace("T", " "), "判断する者": vm.account_label(e.get("account", "")),
+        "種類": "建てた" if e["kind"] == "open" else "閉じた", "通貨": vm.PAIR_LABELS.get(e.get("symbol"), e.get("symbol")),
+        "数量": e.get("units"), "値段": round(e.get("price", e.get("exit_price", 0)) or 0, 3),
+        "損益": round(e["pnl"]) if "pnl" in e else None, "理由": str(e.get("reason", ""))[:100],
+    } for e in reversed(fills)][:300]), hide_index=True, width="stretch")
+
+
+def page_decisions() -> None:
+    venue_header("判断の記録", "実際の口座で、判断する者が何を見てどう判断したか", "ペーパーの口座での判断（AI と機械）")
+    if venue() == "live":
+        live(live_decisions)()
+    else:
+        live(paper_decisions)()
+
+
+def live_decisions() -> None:
+    events = [e for e in live_log() if e.get("kind") == "live_decision"]
+    if not events:
+        st.info("まだありません（15分ごとの回で記録します）", icon=":material/hourglass_empty:")
+        return
+    st.dataframe(pd.DataFrame([{
+        "時刻": e["at"][5:16].replace("T", " "), "判断する者": vm.account_label(e.get("account", "")),
+        "判断": (e.get("decision") or {}).get("action"), "通貨": (e.get("decision") or {}).get("symbol", ""),
+        "結果": "通過" if e.get("approved") else (e.get("rejected") or "見送り"),
+        "根拠・見た数字": (e.get("decision") or {}).get("reasoning", "")
+        or ", ".join(f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")),
+        "使い回し": "○" if e.get("reused") else "",
+    } for e in reversed(events)][:300]), hide_index=True, width="stretch")
+
+
+def paper_decisions() -> None:
+    fx_paper_body()
+
+
+def page_compare() -> None:
+    header("判断する者の比較", "同じ判断する者の、実運用とペーパーの成績を並べる")
+    live(compare_body)()
+
+
+def compare_body() -> None:
+    from jqbt.infrastructure import fx_paper_log
+
+    prices = quotes()
+    paper = fx_paper_log.latest_snapshots(fx_events())
+    events = live_log()
+    closed = live_closed(events)
+    open_rows = live_positions(events, prices)
+    names = list(dict.fromkeys(list(paper) + [r["account"] for r in closed]))
+    rows = []
+    for name in names:
+        state = paper.get(name)
+        label = vm.account_label(name)
+        live_pnl = sum(r["pnl"] for r in closed if r["account"] == name) + \
+            sum(r["含み損益"] for r in open_rows if r["判断する者"] == label)
+        rows.append({"判断する者": label, "種類": vm.account_kind(name),
+                     "ペーパーの損益": round(marked_equity(state, prices) - state["initial"]) if state else None,
+                     "実運用の損益": round(live_pnl) if name in LiveConfig().accounts else None,
+                     "実運用の決済": sum(1 for r in closed if r["account"] == name)})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
+        "ペーパーの損益": st.column_config.NumberColumn(format="%+d 円"),
+        "実運用の損益": st.column_config.NumberColumn(format="%+d 円")})
+    st.caption("実運用はペーパーと数量（1口座100通貨まで）と約定の値段が違うので、損益の大きさは揃いません。"
+               "実運用の損益は、決済した分の確定損益（手数料・スワップ込み）と、持っている建玉の含み損益の合計")
+
+
+def page_controls() -> None:
+    header("操作", "自動売買とペーパー運用の ON/OFF")
+    show_flash()
+    st.markdown(auto_trading_pills(), unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown("**自動売買（実際のお金）**")
+        fx_live_controls()
+    with st.container(border=True):
+        st.markdown("**ペーパー運用（シミュレーション）**")
+        paper_switch()
 
 
 # ----------------------------------------------------------------------
@@ -944,25 +1206,31 @@ ext_pages = [st.Page(extension_page(page.render, page.title), title=page.title, 
                      url_path="ext-" + str(i)) for i, page in enumerate(p for ext in extensions().extensions
                                                                        for p in ext.gui_pages())]
 navigation = st.navigation({
-    "": [st.Page(page_home, title="概要", icon=":material/dashboard:", default=True)],
-    "FX": [st.Page(page_fx_paper, title="ペーパー運用", icon=":material/show_chart:", url_path="fx-paper"),
-           st.Page(page_fx_live, title="実際の約定", icon=":material/account_balance_wallet:", url_path="fx-live"),
+    "": [st.Page(page_overview, title="概要", icon=":material/dashboard:", default=True)],
+    "取引": [st.Page(page_trades, title="取引履歴", icon=":material/receipt_long:", url_path="trades"),
+           st.Page(page_decisions, title="判断の記録", icon=":material/psychology:", url_path="decisions"),
+           st.Page(page_compare, title="判断する者の比較", icon=":material/compare_arrows:", url_path="compare"),
+           st.Page(page_controls, title="操作", icon=":material/toggle_on:", url_path="controls")],
+    "詳細": [st.Page(page_fx_live, title="口座の詳細（実運用）", icon=":material/account_balance_wallet:", url_path="fx-live"),
+           st.Page(page_fx_paper, title="口座の詳細（ペーパー）", icon=":material/show_chart:", url_path="fx-paper"),
            st.Page(page_fx_lab, title="検証（ダミー）", icon=":material/science:", url_path="fx-lab")],
+    **({"AI": ext_pages} if ext_pages else {}),
     "国内株": [st.Page(page_today, title="今日", icon=":material/today:", url_path="stocks"),
-            st.Page(page_signals, title="売買候補と約定", icon=":material/receipt_long:", url_path="signals"),
+            st.Page(page_signals, title="売買候補と約定", icon=":material/assignment:", url_path="signals"),
             st.Page(page_settings, title="設定", icon=":material/tune:", url_path="settings"),
             st.Page(page_history, title="履歴", icon=":material/history:", url_path="history")],
-    **({"AI": ext_pages} if ext_pages else {}),
     "システム": [st.Page(page_system, title="状態", icon=":material/info:", url_path="system")],
 })
 
 with st.sidebar:
+    st.segmented_control("口座", list(VENUES), key="venue", default="実運用", width="stretch")
     st.segmented_control("画面の自動更新", list(REFRESH_CHOICES), key="refresh", default="30秒")
     if st.button("今すぐ更新", icon=":material/refresh:", width="stretch"):
         quotes.clear()
         st.rerun()
-    st.selectbox("国内株の台帳", ["paper", "live"], key="profile",
-                 format_func=lambda p: "ペーパー（仮想の約定）" if p == "paper" else "実運用（実際の約定を記録）")
+    with st.expander("国内株の設定"):
+        st.selectbox("国内株の台帳", ["paper", "live"], key="profile",
+                     format_func=lambda p: "ペーパー（仮想の約定）" if p == "paper" else "実運用（実際の約定を記録）")
     st.caption(DISCLAIMER)
 
 navigation.run()
