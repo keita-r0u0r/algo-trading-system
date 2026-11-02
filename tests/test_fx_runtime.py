@@ -37,10 +37,11 @@ def test_claim_run_ignores_broken_marker(state):
 
 
 @pytest.mark.parametrize(("data", "expected"), [
-    ({"trading": True, "last_cycle": ago(30)}, True),
-    ({"trading": True, "last_cycle": ago(rt.WATCH_FRESH_SECONDS + 60)}, False),  # 止まっている → ジョブが代わる
-    ({"trading": False, "last_cycle": ago(30)}, False),  # 見張るだけ
-    ({"trading": True, "last_cycle": None}, False),
+    ({"trading": True, "last_ok_cycle": ago(30)}, True),
+    ({"trading": True, "last_ok_cycle": ago(rt.WATCH_FRESH_SECONDS + 60)}, False),  # 止まっている・口座に届かない → ジョブが代わる
+    ({"trading": False, "last_ok_cycle": ago(30)}, False),  # 見張るだけ
+    ({"trading": True, "last_ok_cycle": None}, False),
+    ({"trading": True, "last_cycle": ago(30)}, False),  # 回は回っているが口座に届いていない
 ])
 def test_watcher_trades(state, data, expected):
     (state / "fx_watch.json").write_text(json.dumps(data))

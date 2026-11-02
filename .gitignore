@@ -20,3 +20,6 @@ infra/terraform.tfvars
 
 # Claude Code の手元の設定（プレビューの起動など）
 .claude/
+
+# OpenTofu の保存したプラン（設定値が入る）
+*.tfplan

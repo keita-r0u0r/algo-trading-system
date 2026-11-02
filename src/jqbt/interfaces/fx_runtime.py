@@ -427,16 +427,16 @@ def claim_run() -> bool:
     return True
 
 
-#: 見張り役の生きている印。実際の売買をしていて、これより新しければ、ジョブは実際の売買をしない
+#: 見張り役の生きている印。実際の口座に届いた回（last_ok_cycle）がこれより新しければ、ジョブは実際の売買をしない
 WATCH_STATE = STATE / "fx_watch.json"
 WATCH_FRESH_SECONDS = 5 * 60
 
 
 def watcher_trades() -> bool:
-    """見張り役が実際の売買を担当していて、生きているか。"""
+    """見張り役が実際の売買を担当していて、実際の口座に届いているか（IP の制限で弾かれていたらジョブが代わる）。"""
     try:
         state = json.loads(WATCH_STATE.read_text(encoding="utf-8"))
-        last = dt.datetime.fromisoformat(state.get("last_cycle") or "")
+        last = dt.datetime.fromisoformat(state.get("last_ok_cycle") or "")
     except (OSError, ValueError):
         return False
     return bool(state.get("trading")) and (dt.datetime.now(JST) - last).total_seconds() < WATCH_FRESH_SECONDS
@@ -481,11 +481,11 @@ def sync_live() -> None:
         print(f"  実際の約定を読めませんでした: {type(exc).__name__}")
 
 
-def trade_live(ctx: "Context") -> None:
-    """実際の口座で、判断する者ごとに、実際の建玉を見て判断し、発注する。"""
+def trade_live(ctx: "Context") -> bool:
+    """実際の口座で、判断する者ごとに、実際の建玉を見て判断し、発注する。口座に届かなかったら False。"""
     session = LiveSession.open()
     if session is None:
-        return
+        return False
     intents: list[Intent] = []
     for name in session.config.accounts:
         view = live_view(name, session)
@@ -509,6 +509,7 @@ def trade_live(ctx: "Context") -> None:
                                   stop_pips=approved.stop_pips, take_pips=approved.take_pips, reason=reason))
     session.execute(intents)
     session.finish()
+    return True
 
 
 def live_view(name: str, session) -> PaperAccount:
