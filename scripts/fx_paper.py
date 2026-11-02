@@ -376,6 +376,14 @@ def main() -> int:
         new_events.append({"kind": "snapshot", "account": name, "at": now.isoformat(), "state": account.to_dict()})
     fx_paper_log.append(new_events)
 
+    # 自動売買（実際のお金）。有効にしていなければ注文は出さない。失敗してもペーパー運用は止めない
+    try:
+        from fx_live_trade import run as live_trade
+
+        live_trade(new_events)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  自動売買でエラー: {type(exc).__name__}: {str(exc)[:200]}")
+
     # 実際の約定・建玉・資産も読んで記録する（読むだけ。失敗してもペーパー運用は止めない）
     try:
         from fx_live_sync import sync

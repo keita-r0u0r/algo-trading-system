@@ -59,3 +59,15 @@ variable "fx_paper_schedule" {
   type        = string
   default     = "1 * * * 1-6"
 }
+
+variable "fx_live_egress" {
+  description = "自動売買の出口の IP を固定する（Cloud NAT と固定 IP。有料）。注文用のキーの IP 制限に使う"
+  type        = bool
+  default     = false
+}
+
+variable "fx_live_enabled" {
+  description = "自動売買（実際のお金）で注文を出す。false なら、何をするかを記録するだけ"
+  type        = bool
+  default     = false
+}

@@ -27,3 +27,8 @@ output "image_tag" {
 output "app_version" {
   value = var.app_version
 }
+
+output "egress_ip" {
+  description = "自動売買の出口の固定 IP（GMOコインの注文用のキーの IP 制限に登録する）"
+  value       = length(google_compute_address.egress) == 0 ? "" : google_compute_address.egress[0].address
+}

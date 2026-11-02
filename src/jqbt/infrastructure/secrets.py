@@ -45,6 +45,11 @@ SECRETS: dict[str, SecretName] = {
         SecretName("jquants_api_key", "JQUANTS_API_KEY", "jquants-api-key", "J-Quants の APIキー"),
         SecretName("gmo_fx_api_key", "GMO_FX_API_KEY", "gmo-fx-api-key", "GMOコイン 外国為替FX の APIキー"),
         SecretName("gmo_fx_api_secret", "GMO_FX_API_SECRET", "gmo-fx-api-secret", "GMOコイン 外国為替FX の APIシークレット"),
+        # 発注用（照会用とは別のキー。IP の制限を付ける。scripts/fx_live_trade.py だけが使う）
+        SecretName("gmo_fx_trade_api_key", "GMO_FX_TRADE_API_KEY", "gmo-fx-trade-api-key",
+                   "GMOコイン 外国為替FX の 発注用 APIキー"),
+        SecretName("gmo_fx_trade_api_secret", "GMO_FX_TRADE_API_SECRET", "gmo-fx-trade-api-secret",
+                   "GMOコイン 外国為替FX の 発注用 APIシークレット"),
     )
 }
 
