@@ -32,3 +32,8 @@ output "egress_ip" {
   description = "自動売買の出口の固定 IP（GMOコインの注文用のキーの IP 制限に登録する）"
   value       = length(google_compute_address.egress) == 0 ? "" : google_compute_address.egress[0].address
 }
+
+output "watcher_ip" {
+  description = "見張り役（随時判断・発注）の固定 IP。GMOコインの注文用のキーの IP 制限に足す"
+  value       = length(google_compute_address.watcher) == 0 ? "" : google_compute_address.watcher[0].address
+}

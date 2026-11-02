@@ -475,9 +475,9 @@ resource "google_compute_router_nat" "egress" {
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }
 
-# --- 値段の見張り役（常時動く小さな仮想マシン） ------------------------------------------
-# GMOコインの値段の配信を受け取り続け、急変などのときだけ判断の回（fx_paper のジョブ）を起こす。
-# 無料の枠がある us-central1 の e2-micro。値段を見るだけで、注文用のキーは持たない
+# --- 見張り役（常時動く小さな仮想マシン） ----------------------------------------------
+# GMOコインの値段の配信を受け取り続け、実際の売買の随時判断（急変など）と定期判断（5分ごと）を、この中で行う。
+# 無料の枠がある us-central1 の e2-micro。発注するので、外に出る IP を固定し（watcher_ip）、注文用のキーに登録する
 
 resource "google_service_account" "watcher" {
   count        = var.fx_watch_enabled ? 1 : 0
@@ -507,6 +507,27 @@ resource "google_artifact_registry_repository_iam_member" "watcher_pull" {
   location   = var.region
   role       = "roles/artifactregistry.reader"
   member     = google_service_account.watcher[0].member
+}
+
+resource "google_project_iam_member" "watcher_secrets" {
+  # 注文用・照会用のキーを読む（Secret Manager）
+  count   = var.fx_watch_enabled ? 1 : 0
+  project = var.project
+  role    = "roles/secretmanager.secretAccessor"
+  member  = google_service_account.watcher[0].member
+}
+
+resource "google_project_iam_member" "watcher_ai" {
+  count   = var.fx_watch_enabled ? 1 : 0
+  project = var.project
+  role    = "roles/aiplatform.user"
+  member  = google_service_account.watcher[0].member
+}
+
+resource "google_compute_address" "watcher" {
+  count  = var.fx_watch_enabled ? 1 : 0
+  name   = "${local.name}-watcher"
+  region = "us-central1"
 }
 
 resource "google_project_iam_member" "watcher_logs" {
@@ -552,7 +573,9 @@ resource "google_compute_instance" "watcher" {
 
   network_interface {
     subnetwork = google_compute_subnetwork.watch[0].id
-    access_config {} # 外に出る（値段の配信・GCP の API）
+    access_config {
+      nat_ip = google_compute_address.watcher[0].address # 注文用のキーの IP 制限に登録する
+    }
   }
 
   service_account {
@@ -579,6 +602,8 @@ resource "google_compute_instance" "watcher" {
           ExecStart=/usr/bin/docker run --rm --name=fx-watch --log-driver=gcplogs \
             -e GCP_PROJECT=${var.project} -e STATE_BUCKET=${google_storage_bucket.state.name} \
             -e FX_JOB_NAME=${local.name}-fx-paper -e FX_JOB_REGION=${var.region} \
+            -e FX_WATCH_TRADES=true -e FX_LIVE_ENABLED=${var.fx_live_enabled} -e JQBT_EXTENSIONS=ai \
+            -e AI_VERTEX_REGION=global -e AI_MONTHLY_BUDGET_USD=${var.ai_monthly_budget_usd} -e JQBT_VERSION=${var.app_version} \
             ${local.image}:${var.image_tag} python scripts/fx_watch.py
           ExecStop=/usr/bin/docker stop fx-watch
           Restart=always
@@ -598,5 +623,7 @@ resource "google_compute_instance" "watcher" {
   depends_on = [
     google_storage_bucket_iam_member.watcher_state,
     google_artifact_registry_repository_iam_member.watcher_pull,
+    google_project_iam_member.watcher_secrets,
+    google_project_iam_member.watcher_ai,
   ]
 }
