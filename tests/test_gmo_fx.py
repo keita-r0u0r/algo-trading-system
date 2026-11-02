@@ -55,3 +55,19 @@ def test_client_cannot_place_orders():
     """注文・決済・取消の口は作らない（GET だけ）。"""
     source = inspect.getsource(GmoFxClient)
     assert ".post(" not in source and '"POST"' not in source
+
+
+def test_private_get_retries_once_on_rate_limit(monkeypatch):
+    import jqbt.infrastructure.gmo_fx as gmo
+
+    monkeypatch.setattr(gmo.time, "sleep", lambda s: None)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, json={"status": 1, "messages": [{"message_code": "ERR-5003", "message_string": "Requests are too many."}]})
+        return httpx.Response(200, json={"status": 0, "data": {"equity": "0"}})
+
+    assert GmoFxClient("k", "s", client=_client(handler)).assets() == {"equity": "0"}
+    assert len(calls) == 2

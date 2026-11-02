@@ -15,7 +15,8 @@ APIキーも「照会」の権限だけで発行する（漏れても注文・�
 
 ## レート制限
 
-Private の GET は1秒に6回まで。疎通確認や約定の照会では、まず超えない。
+Private の GET は1秒に6回まで（口座ごと。照会用と発注用のキーで分け合う）。
+続けて呼ぶと超えるので、``GET_INTERVAL`` 秒ずつ間を空ける。超えたら（ERR-5003）少し待って1回だけやり直す。
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ import httpx
 
 PUBLIC_URL = "https://forex-api.coin.z.com/public"
 PRIVATE_URL = "https://forex-api.coin.z.com/private"
+#: Private の GET の間隔（秒）。上限は1秒に6回だが、別のキーと分け合うので余裕を持つ
+GET_INTERVAL = 0.4
 
 
 class GmoError(RuntimeError):
@@ -81,16 +84,27 @@ class GmoFxClient:
         )
 
     # --- Private（照会だけ） -----------------------------------------------
-    def _private_get(self, path: str, params: dict[str, str] | None = None) -> Any:
+    def _private_get(self, path: str, params: dict[str, str] | None = None, retry: bool = True) -> Any:
         if not (self._key and self._secret):
             raise GmoError("APIキーとシークレットがありません")
+        wait = GET_INTERVAL - (time.monotonic() - getattr(self, "_last_get", 0.0))
+        if wait > 0:
+            time.sleep(wait)
         timestamp = str(int(time.time() * 1000))
         headers = {
             "API-KEY": self._key,
             "API-TIMESTAMP": timestamp,
             "API-SIGN": sign(self._secret, timestamp, "GET", path),
         }
-        return self._unwrap(self._http.get(f"{PRIVATE_URL}{path}", params=params, headers=headers))
+        try:
+            return self._unwrap(self._http.get(f"{PRIVATE_URL}{path}", params=params, headers=headers))
+        except GmoError as exc:
+            if retry and "ERR-5003" in str(exc):  # 呼びすぎ。少し待って1回だけやり直す
+                time.sleep(2)
+                return self._private_get(path, params, retry=False)
+            raise
+        finally:
+            self._last_get = time.monotonic()
 
     def assets(self) -> dict[str, Any] | list[dict[str, Any]]:
         """資産（評価額・証拠金・証拠金維持率など）。"""

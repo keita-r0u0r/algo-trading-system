@@ -135,6 +135,11 @@ def run(paper_events: list[dict], quiet: bool = False) -> dict:
     events: list[dict] = []
     try:
         open_ids = {int(p["positionId"]) for p in trader.open_positions()}
+        # 発注用のキーが使えるか（IP の制限を通るか）。状態が変わったときだけ記録する
+        last_ready = next((e for e in reversed(log) if e.get("kind") == "live_ready"), None)
+        if not last_ready or not last_ready.get("ok"):
+            events.append({"kind": "live_ready", "at": now, "ok": True, "enabled": config.enabled,
+                           "note": "発注用のキーで照会できた（IP の制限を通った）"})
         for p in gone_positions(book, open_ids):
             events.append({"kind": "live_gone", "at": now, "account": p.account, "position_id": p.position_id,
                            "note": "GMOコイン側で決済された（損切り・利確・ロスカット）"})
@@ -153,6 +158,9 @@ def run(paper_events: list[dict], quiet: bool = False) -> dict:
             events += execute(trader, action, now)
     except GmoError as exc:
         events.append({"kind": "live_error", "at": now, "error": str(exc)[:300]})
+        last_ready = next((e for e in reversed(log) if e.get("kind") == "live_ready"), None)
+        if not last_ready or last_ready.get("ok"):
+            events.append({"kind": "live_ready", "at": now, "ok": False, "note": str(exc)[:200]})
     fx_live_log.append(events)
     orders = sum(e["kind"] in ("live_open", "live_close") for e in events)
     if not quiet and events:
