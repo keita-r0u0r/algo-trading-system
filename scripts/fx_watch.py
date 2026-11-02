@@ -8,7 +8,7 @@
   * 定期判断: 5分ごとに、実際の口座の判断をする（AI は15分ごと）
   * 判断と発注の段取りは、ジョブと同じ部品（interfaces/fx_runtime.py・fx_live.py）を使う
   * 記録（state/ の一部）は Cloud Storage と同期する。追記した分だけを、他の書き込みを上書きせずに上げる
-  * 1分ごとに生きている印を state/fx_watch.json に書く。これが新しい間、ジョブは実際の売買をしない（ペーパーだけ）
+  * 1分ごとに生きている印を state/fx_watch.json に書く。口座に届いた回が新しい間、ジョブは実際の売買をしない（ペーパーだけ）
 
 環境変数: GCP_PROJECT, STATE_BUCKET, FX_WATCH_TRADES（true で実際の売買もする）, FX_LIVE_ENABLED ほか
 """
@@ -88,8 +88,8 @@ def current_positions(state_dir: Path) -> list[dict]:
     return paper + live
 
 
-def live_cycle(cloud: Cloud | None, reason: str) -> str:
-    """実際の口座で1回判断して、必要なら発注する（ジョブと同じ部品）。"""
+def live_cycle(cloud: Cloud | None, reason: str) -> tuple[str, bool]:
+    """実際の口座で1回判断して、必要なら発注する（ジョブと同じ部品）。(結果, 口座に届いたか)"""
     from fx_paper import build_ai
 
     from jqbt.interfaces import fx_runtime as rt
@@ -98,14 +98,14 @@ def live_cycle(cloud: Cloud | None, reason: str) -> str:
         cloud.pull()
     ctx = rt.build_context(build_ai(), trigger=reason)
     if ctx is None:
-        result = "市場が閉まっている"
+        result, ok = "市場が閉まっている", True
     else:
-        rt.trade_live(ctx)
+        ok = rt.trade_live(ctx)
         rt.sync_live()
-        result = "判断した"
+        result = "判断した" if ok else "口座に届かない（キー・IP の制限）"
     if cloud:
         cloud.push()
-    return result
+    return result, ok
 
 
 async def watch(dry_run: bool) -> None:
@@ -117,7 +117,7 @@ async def watch(dry_run: bool) -> None:
     cloud = None if dry_run else Cloud(rt.STATE)
     history = PriceHistory(dt.timedelta(minutes=CONFIG.window_minutes))
     state = {"started_at": dt.datetime.now(JST).isoformat(timespec="seconds"), "last_tick": None,
-             "trading": trades, "last_cycle": None, "cycles": 0, "reconnects": 0, "wakes": []}
+             "trading": trades, "last_cycle": None, "last_ok_cycle": None, "cycles": 0, "reconnects": 0, "wakes": []}
     positions: list[dict] = []
     last_wake: dt.datetime | None = None
     fired: set[str] = set()
@@ -129,14 +129,17 @@ async def watch(dry_run: bool) -> None:
         nonlocal busy
         busy = True
         started = time.monotonic()
+        ok = False
         try:
-            result = await asyncio.to_thread(live_cycle, cloud, reason)
+            result, ok = await asyncio.to_thread(live_cycle, cloud, reason)
         except Exception as exc:  # noqa: BLE001  1回の失敗で見張りは止めない
             result = f"失敗: {type(exc).__name__}: {str(exc)[:160]}"
         finally:
             busy = False
         now = dt.datetime.now(JST)
         state["last_cycle"] = now.isoformat(timespec="seconds")
+        if ok:
+            state["last_ok_cycle"] = state["last_cycle"]
         state["cycles"] += 1
         if reason:
             state["wakes"] = (state["wakes"] + [{"at": now.isoformat(timespec="seconds"), "reason": reason,
