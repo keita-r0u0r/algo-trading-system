@@ -54,6 +54,8 @@ from jqbt.interfaces.extensions import enabled_names  # noqa: E402
 JST = dt.timezone(dt.timedelta(hours=9))
 STATE = Path(__file__).resolve().parents[1] / "state"
 KILL = STATE / "KILL_fx_paper"
+#: 在れば、この回は判断も仮想の約定もしない（画面の「ペーパー運用を止める」）
+PAUSE = STATE / "PAUSE_fx_paper"
 BASE = "USD_JPY"
 SYMBOLS = ("USD_JPY", "EUR_JPY", "GBP_JPY", "AUD_JPY")
 CARRY_ACCOUNTS = {f"carry_trend_{sym}": sym for sym in SYMBOLS}
@@ -237,6 +239,17 @@ def main() -> int:
         for acc in accounts.values():
             print(f"{acc.name:<22} 評価額 {acc.equity or acc.cash:>9,.0f}円  建玉 "
                   f"{(acc.position.symbol + ' ' + f'{acc.position.units:+,.0f}') if acc.position else '—'}")
+        return 0
+
+    if PAUSE.exists():
+        # 画面から止めている。判断も仮想の約定もしない（自動売買も新しく建てない）。実際の口座の照会だけ続ける
+        print(f"ペーパー運用は止めています（{PAUSE.read_text(encoding='utf-8').strip()}）")
+        try:
+            from fx_live_sync import sync
+
+            sync(quiet=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  実際の約定を読めませんでした: {type(exc).__name__}")
         return 0
 
     api = GmoFxClient()
