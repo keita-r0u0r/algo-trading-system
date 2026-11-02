@@ -17,3 +17,6 @@ state/
 infra/.terraform/
 infra/*.tfstate*
 infra/terraform.tfvars
+
+# Claude Code の手元の設定（プレビューの起動など）
+.claude/

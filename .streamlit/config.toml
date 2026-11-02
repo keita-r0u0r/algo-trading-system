@@ -4,9 +4,22 @@ address = "127.0.0.1"
 port = 8501
 headless = true
 
+[client]
+# 開発用のツールバー（Deploy など）を出さない
+toolbarMode = "minimal"
+
 [browser]
 # 利用状況を外部に送らない
 gatherUsageStats = false
 # 表示用のアドレスを固定する。固定しないと、起動時に外部のサービスへ問い合わせて
 # 自分のグローバルIPアドレスを調べ、ログに出す（実際には外からつながらないが、余計な通信）
 serverAddress = "localhost"
+
+[theme]
+# 落ち着いた明るい配色。強調は1色（青）にそろえる
+base = "light"
+primaryColor = "#2563EB"
+backgroundColor = "#F6F7F9"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0F172A"
+font = "sans serif"

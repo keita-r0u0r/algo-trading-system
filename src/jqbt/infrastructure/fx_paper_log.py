@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-DEFAULT_PATH = Path(__file__).resolve().parents[3] / "state" / "fx_paper.jsonl"
+#: 環境変数 JQBT_FX_PAPER_LOG があれば、そちらを使う（クラウドの記録のコピーを手元の画面で見るときなど）
+DEFAULT_PATH = Path(os.environ.get("JQBT_FX_PAPER_LOG") or Path(__file__).resolve().parents[3] / "state" / "fx_paper.jsonl")
 
 
 def append(events: list[dict[str, Any]], path: Path = DEFAULT_PATH) -> None:
