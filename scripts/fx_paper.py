@@ -24,6 +24,7 @@ AI を使うには、拡張パーツ ``ai`` を有効にする（``JQBT_EXTENSIO
 from __future__ import annotations
 
 import argparse
+import json
 import datetime as dt
 import os
 import sys
@@ -58,6 +59,11 @@ STATE = Path(__file__).resolve().parents[1] / "state"
 KILL = STATE / "KILL_fx_paper"
 #: 在れば、この回は判断も仮想の約定もしない（画面の「ペーパー運用を止める」）
 PAUSE = STATE / "PAUSE_fx_paper"
+#: 回が始まった時刻。見張り役が起こした回と定期の回が重なったら、後のほうは何もしない
+STARTED = STATE / "fx_run_started"
+#: 見張り役が見る、今の建玉（ペーパーと実際）の要約。小さなファイルにして、毎分読んでも軽くする
+POSITIONS = STATE / "fx_positions.json"
+OVERLAP_SECONDS = 120
 BASE = "USD_JPY"
 SYMBOLS = ("USD_JPY", "EUR_JPY", "GBP_JPY", "AUD_JPY")
 CARRY_ACCOUNTS = {f"carry_trend_{sym}": sym for sym in SYMBOLS}
@@ -248,6 +254,8 @@ class Context:
     #: 同じ状態（建玉なし・同じ向き）なら、AI の判断を使い回す（ペーパーと実際で2回呼ばない）
     ai_cache: dict = field(default_factory=dict)
     closes: dict = field(default_factory=dict)
+    #: 見張り役が起こした理由（定期の回なら空）
+    trigger: str = ""
 
 
 def frame_for(name: str, ctx: Context) -> TradingFrame:
@@ -274,12 +282,15 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict]) -
             data, extra = ctx.ai_cache[key]
             return [(data, f"AI（同じ状態の判断を使い回し）: {data.get('reasoning', '')}", {**extra, "reused": True})]
         context = ai_context(account, frame, quotes, bars, now, events, ctx.today_rates)
+        if ctx.trigger:
+            context["market"]["wake_reason"] = f"見張り役がこの回を起こした理由: {ctx.trigger}"
         try:
             reply = ctx.ai.fx_decide(context, now.date())
         except Exception as exc:  # AI が使えなくても、他は進める
             return [({"action": "hold"}, "", {"error": str(exc)[:300]})]
         data = reply.data or {}
         extra = {"model": reply.model, "call_id": reply.call_id, "confidence": data.get("confidence"),
+                 "trigger": ctx.trigger,
                  "prompt_version": getattr(ctx.ai, "fx_prompt_version", None),
                  # AI が見たもの。根拠と照らし合わせて、改善の種にする（scripts/fx_paper_review.py）
                  "context": context}
@@ -356,6 +367,20 @@ def main() -> int:
                   f"{(acc.position.symbol + ' ' + f'{acc.position.units:+,.0f}') if acc.position else '—'}")
         return 0
 
+    trigger = os.environ.get("TRIGGER_REASON", "")
+    if STARTED.exists():
+        try:
+            last = dt.datetime.fromisoformat(STARTED.read_text(encoding="utf-8").strip())
+            if (dt.datetime.now(JST) - last).total_seconds() < OVERLAP_SECONDS:
+                print(f"直前（{last:%H:%M:%S}）に回が始まっているので、今回は何もしません（重なり防止）")
+                return 0
+        except ValueError:
+            pass
+    STARTED.parent.mkdir(parents=True, exist_ok=True)
+    STARTED.write_text(dt.datetime.now(JST).isoformat(timespec="seconds"), encoding="utf-8")
+    if trigger:
+        print(f"見張り役が起こした回: {trigger}")
+
     paused = PAUSE.exists()
     api = GmoFxClient()
     now = dt.datetime.now(JST).replace(second=0, microsecond=0)
@@ -388,7 +413,7 @@ def main() -> int:
     ai = build_ai()
     ctx = Context(api=api, now=now, frame=frame, carry_frame=carry_frame, insts=insts, quotes=quotes, bars=bars,
                   ai=ai, today_rates=rates_summary(now.date()) if ai is not None else {},
-                  short=short_rates(now.date()), ai_cache={})
+                  short=short_rates(now.date()), ai_cache={}, trigger=trigger)
 
     # --- ペーパー運用（シミュレーション）。止めていれば何もしない。実際の売買には影響しない ---
     new_events: list[dict] = []
@@ -439,8 +464,9 @@ def main() -> int:
         print(f"  自動売買でエラー: {type(exc).__name__}: {str(exc)[:200]}")
 
     sync_live()
+    write_positions(accounts if not paused else {})
 
-    print(f"{now:%Y-%m-%d %H:%M} 日本時間 / リスクの度合い {args.risk}")
+    print(f"{now:%Y-%m-%d %H:%M} 日本時間 / リスクの度合い {args.risk}" + (f" / 起こした理由: {trigger}" if trigger else ""))
     for e in new_events:
         if e["kind"] == "decision":
             mark_ = "通過" if e.get("approved") else ("見送り" if not e.get("rejected") else f"却下: {e['rejected']}")
@@ -454,6 +480,22 @@ def main() -> int:
         for acc in accounts.values():
             print(f"  {acc.name:<22} 評価額 {acc.equity:>9,.0f}円")
     return 0
+
+
+def write_positions(accounts: dict[str, PaperAccount]) -> None:
+    """見張り役のための、今の建玉の要約（ペーパーと実際）。"""
+    from jqbt.application.fx_live_trade import book_from_events
+    from jqbt.infrastructure import fx_live_log
+
+    rows = [{"venue": "paper", "account": a.name, "symbol": a.position.symbol, "stop": a.position.stop,
+             "take": a.position.take} for a in accounts.values() if a.position is not None]
+    rows += [{"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take}
+             for p in book_from_events(fx_live_log.load()).values()]
+    try:
+        POSITIONS.write_text(json.dumps({"at": dt.datetime.now(JST).isoformat(timespec="seconds"), "positions": rows},
+                                        ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        print(f"  建玉の要約を書けませんでした: {exc}")
 
 
 def sync_live() -> None:

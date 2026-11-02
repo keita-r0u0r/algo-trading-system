@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -721,9 +722,27 @@ def live_closed(events: list[dict]) -> list[dict]:
     return rows
 
 
+def watcher_state() -> dict:
+    """見張り役の生きている印（state/fx_watch.json）。"""
+    path = ROOT / "state" / "fx_watch.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def watcher_pill() -> str:
+    state = watcher_state()
+    last = state.get("last_tick")
+    if not last:
+        return pill("見張り: 動いていない", "warn")
+    age = (dt.datetime.now(JST) - dt.datetime.fromisoformat(last)).total_seconds()
+    return pill(f"見張り: 動いている（{last[11:16]}）", "ok") if age < 300 else pill(f"見張り: 止まっている（{last[5:16].replace('T', ' ')}）", "bad")
+
+
 def auto_trading_pills() -> str:
     enabled = os.environ.get("FX_LIVE_ENABLED", "").lower() == "true"
-    return " ".join([
+    return " ".join([watcher_pill(),
         pill("自動売買: ON", "ok") if enabled and not KILL_LIVE.exists() else pill("自動売買: 止めている", "warn"),
         pill("キルスイッチ: 入", "bad") if KILL_LIVE.exists() else pill("キルスイッチ: 切", "ok"),
         pill("ペーパー: 止めている", "warn") if PAUSE_PAPER.exists() else pill("ペーパー: 動いている", "info"),
@@ -1182,6 +1201,13 @@ def page_system() -> None:
             st.markdown(pill(fresh["message"], "ok" if fresh["ok"] else "warn"), unsafe_allow_html=True)
         except Exception as exc:  # データが無くても、システムの画面は出す
             st.caption(f"読み込めません: {exc}")
+        st.markdown("**値段の見張り役**")
+        state = watcher_state()
+        st.markdown(watcher_pill(), unsafe_allow_html=True)
+        for w in reversed(state.get("wakes", [])[-10:]):
+            st.caption(f"{w['at'][5:16].replace('T', ' ')} {w['reason']} → {w['result']}")
+        if state and not state.get("wakes"):
+            st.caption("まだ判断の回を起こしていません")
     with c2, st.container(border=True):
         st.markdown("**秘密情報**（値は表示しません）")
         for line in secret_overview():
