@@ -11,7 +11,7 @@ AI を毎回呼ぶのは高く遅いので、見張りは機械的に行い、�
 ## 起こさないとき（判断の回が重なると、記録が壊れるため）
 
   * 直前に起こしてから ``cooldown_minutes`` 分たっていない
-  * 定期の回（15分ごと）の前後 ``scheduled_guard_minutes`` 分
+  * 定期の回（5分ごと）の前後 ``scheduled_guard_minutes`` 分
 """
 
 from __future__ import annotations
@@ -29,8 +29,9 @@ class WatchConfig:
     #: 冬時間（11月〜3月）の目安。ロンドン 17:00、ニューヨーク 22:00
     session_times: tuple[str, ...] = ("17:00", "22:00")
     cooldown_minutes: int = 5
-    scheduled_every_minutes: int = 15
-    scheduled_guard_minutes: int = 2
+    #: 定期の回の間隔と、その前後で起こさない時間（定期の回と重ならないように）
+    scheduled_every_minutes: int = 5
+    scheduled_guard_minutes: int = 1
     pip: float = 0.01
 
 

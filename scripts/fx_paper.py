@@ -64,6 +64,10 @@ STARTED = STATE / "fx_run_started"
 #: 見張り役が見る、今の建玉（ペーパーと実際）の要約。小さなファイルにして、毎分読んでも軽くする
 POSITIONS = STATE / "fx_positions.json"
 OVERLAP_SECONDS = 120
+#: AI を呼ぶ間隔（秒）。定期の回は5分ごとだが、AI は見張り役が起こした回か、前回からこの時間たった回だけ呼ぶ
+#: （毎回呼ぶと月の費用の上限を超える）。それ以外の回の AI の口座は、前の判断のまま（見送り）
+AI_INTERVAL_SECONDS = 15 * 60
+AI_LAST = STATE / "fx_ai_last"
 BASE = "USD_JPY"
 SYMBOLS = ("USD_JPY", "EUR_JPY", "GBP_JPY", "AUD_JPY")
 CARRY_ACCOUNTS = {f"carry_trend_{sym}": sym for sym in SYMBOLS}
@@ -256,6 +260,8 @@ class Context:
     closes: dict = field(default_factory=dict)
     #: 見張り役が起こした理由（定期の回なら空）
     trigger: str = ""
+    #: この回で AI を呼ぶか
+    ai_due: bool = True
 
 
 def frame_for(name: str, ctx: Context) -> TradingFrame:
@@ -275,8 +281,9 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict]) -
     now, quotes, bars, frame = ctx.now, ctx.quotes, ctx.bars, ctx.frame
     decisions: list[tuple[dict, str, dict]] = []
     if name == "ai":
-        if ctx.ai is None:
-            return []
+        if ctx.ai is None or not ctx.ai_due:
+            return [({"action": "hold"}, "", {"note": "AI を呼ぶ回ではない（前回から15分たっていない・見張り役が起こしていない）"})] \
+                if ctx.ai is not None else []
         key = position_signature(account)
         if key in ctx.ai_cache:
             data, extra = ctx.ai_cache[key]
@@ -413,7 +420,7 @@ def main() -> int:
     ai = build_ai()
     ctx = Context(api=api, now=now, frame=frame, carry_frame=carry_frame, insts=insts, quotes=quotes, bars=bars,
                   ai=ai, today_rates=rates_summary(now.date()) if ai is not None else {},
-                  short=short_rates(now.date()), ai_cache={}, trigger=trigger)
+                  short=short_rates(now.date()), ai_cache={}, trigger=trigger, ai_due=ai_due(trigger))
 
     # --- ペーパー運用（シミュレーション）。止めていれば何もしない。実際の売買には影響しない ---
     new_events: list[dict] = []
@@ -480,6 +487,22 @@ def main() -> int:
         for acc in accounts.values():
             print(f"  {acc.name:<22} 評価額 {acc.equity:>9,.0f}円")
     return 0
+
+
+def ai_due(trigger: str) -> bool:
+    """この回で AI を呼ぶか。見張り役が起こした回は必ず。そうでなければ前回から AI_INTERVAL_SECONDS たったら。"""
+    now = dt.datetime.now(JST)
+    try:
+        last = dt.datetime.fromisoformat(AI_LAST.read_text(encoding="utf-8").strip()) if AI_LAST.exists() else None
+    except ValueError:
+        last = None
+    due = bool(trigger) or last is None or (now - last).total_seconds() >= AI_INTERVAL_SECONDS - 60
+    if due:
+        try:
+            AI_LAST.write_text(now.isoformat(timespec="seconds"), encoding="utf-8")
+        except OSError:
+            pass
+    return due
 
 
 def write_positions(accounts: dict[str, PaperAccount]) -> None:
