@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import httpx
 import pytest
@@ -142,8 +140,7 @@ def test_protect_uses_oco_with_take_and_stop_otherwise():
 
 # --- 安全装置: 損切りを置けなければ、決済してキルスイッチ ---------------------------------
 def test_failsafe_closes_and_kills_when_stop_cannot_be_placed(tmp_path, monkeypatch):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    import fx_live_trade
+    from jqbt.interfaces import fx_live as fx_live_trade
 
     monkeypatch.setattr(fx_live_trade, "KILL", tmp_path / "KILL_fx_live")
     monkeypatch.setattr(fx_live_trade.time, "sleep", lambda s: None)

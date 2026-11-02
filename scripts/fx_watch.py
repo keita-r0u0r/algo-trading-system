@@ -1,15 +1,16 @@
-"""値段の見張り役（常時動く）。機械的な条件に当たったときだけ、判断の回（Cloud Run のジョブ）を起こす。
+"""見張り役（常時動く）。実際の売買の **随時判断** と **定期判断** を、この中で行う。
 
-  python scripts/fx_watch.py             # 見張る（GCP では仮想マシンの上で動き続ける）
-  python scripts/fx_watch.py --dry-run   # 起こさずに、起こす理由を表示するだけ
+  python scripts/fx_watch.py             # 見張って、実際の売買もする（GCP では仮想マシンの上で動き続ける）
+  python scripts/fx_watch.py --dry-run   # 見張るだけ（起こす理由を表示する。判断も発注もしない）
 
-  * GMOコインの公開の値段の配信（WebSocket）を受け取り続ける。注文用のキーは持たない（値段を見るだけ）
-  * 条件（application/fx_watch.py）: 急変・建玉が損切り/利確に近い・時間帯の切り替わり
-  * 起こすときは、ジョブに「起こした理由」を渡す（AI はそれを見て判断する）
-  * 1分ごとに、生きている印（最後に値段を受け取った時刻・起こした記録）を state/fx_watch.json に書く（画面で見る）
-  * 建玉は、ジョブが書く state/fx_positions.json から読む（毎分）
+  * GMOコインの公開の値段の配信（WebSocket）を受け取り続け、値段が届くたびに条件（application/fx_watch.py）を確かめる
+  * 随時判断: 急変・建玉が損切り/利確に近い・時間帯の切り替わりのとき、**その場で** 判断して発注する（AI も呼ぶ）
+  * 定期判断: 5分ごとに、実際の口座の判断をする（AI は15分ごと）
+  * 判断と発注の段取りは、ジョブと同じ部品（interfaces/fx_runtime.py・fx_live.py）を使う
+  * 記録（state/ の一部）は Cloud Storage と同期する。追記した分だけを、他の書き込みを上書きせずに上げる
+  * 1分ごとに生きている印を state/fx_watch.json に書く。これが新しい間、ジョブは実際の売買をしない（ペーパーだけ）
 
-環境変数: GCP_PROJECT, STATE_BUCKET, FX_JOB_NAME, FX_JOB_REGION
+環境変数: GCP_PROJECT, STATE_BUCKET, FX_WATCH_TRADES（true で実際の売買もする）, FX_LIVE_ENABLED ほか
 """
 
 from __future__ import annotations
@@ -24,35 +25,46 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jqbt.application.fx_watch import PriceHistory, WatchConfig, reason_to_wake  # noqa: E402
 
 JST = dt.timezone(dt.timedelta(hours=9))
 WS_URL = "wss://forex-api.coin.z.com/ws/public/v1"
 SYMBOLS = ("USD_JPY", "EUR_JPY", "GBP_JPY", "AUD_JPY")
-STATE_OBJECT, POSITIONS_OBJECT = "state/fx_watch.json", "state/fx_positions.json"
+#: 見張り役は実際の売買の唯一の担い手なので、定期の回をよける必要はない（ジョブはペーパーだけ）
+CONFIG = WatchConfig(scheduled_guard_minutes=0)
+PERIODIC_SECONDS = 5 * 60
 
 
 class Cloud:
-    """GCS と Cloud Run を、サービスアカウントの権限で呼ぶ（仮想マシンのメタデータからトークンを取る）。"""
+    """Cloud Storage との同期（サービスアカウントの権限。仮想マシンのメタデータからトークンを取る）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, state_dir: Path) -> None:
         import google.auth
         from google.auth.transport.requests import AuthorizedSession
 
+        from jqbt.infrastructure.gcs_sync import SyncedFile, SyncedFlag
+
         credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         self.http = AuthorizedSession(credentials)
-        self.project = os.environ["GCP_PROJECT"]
-        self.bucket = os.environ["STATE_BUCKET"]
-        self.job = os.environ.get("FX_JOB_NAME", "algo-trading-fx-paper")
-        self.region = os.environ.get("FX_JOB_REGION", "asia-northeast1")
+        bucket = os.environ["STATE_BUCKET"]
+        self.bucket = bucket
+        self.files = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
+                      for n in ("fx_live.jsonl", "ai_usage.jsonl")]
+        self.read_only = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
+                          for n in ("ai_settings.json", "ai_models.json", "fx_positions.json")]
+        self.flags = [SyncedFlag(self.http, bucket, "state/KILL_fx_live", state_dir / "KILL_fx_live")]
 
-    def read_json(self, name: str) -> dict:
-        from urllib.parse import quote
+    def pull(self) -> None:
+        for f in [*self.files, *self.read_only, *self.flags]:
+            f.pull()
 
-        r = self.http.get(f"https://storage.googleapis.com/storage/v1/b/{self.bucket}/o/{quote(name, safe='')}",
-                          params={"alt": "media"}, timeout=20)
-        return r.json() if r.status_code == 200 else {}
+    def push(self) -> None:
+        for f in self.files:
+            f.push()
+        for f in self.flags:
+            f.push()
 
     def write_json(self, name: str, data: dict) -> None:
         self.http.post(f"https://storage.googleapis.com/upload/storage/v1/b/{self.bucket}/o",
@@ -60,25 +72,76 @@ class Cloud:
                        data=json.dumps(data, ensure_ascii=False).encode(), headers={"Content-Type": "application/json"},
                        timeout=20)
 
-    def wake(self, reason: str) -> str:
-        url = f"https://run.googleapis.com/v2/projects/{self.project}/locations/{self.region}/jobs/{self.job}:run"
-        body = {"overrides": {"containerOverrides": [{"env": [{"name": "TRIGGER_REASON", "value": reason[:200]}]}]}}
-        r = self.http.post(url, json=body, timeout=30)
-        return "起こした" if r.status_code < 300 else f"起こせなかった（HTTP {r.status_code}: {r.text[:120]}）"
+
+def current_positions(state_dir: Path) -> list[dict]:
+    """見張る建玉: ペーパーの建玉（ジョブが書く要約）と、実際の建玉（この見張り役の記録）。"""
+    from jqbt.application.fx_live_trade import book_from_events
+    from jqbt.infrastructure import fx_live_log
+
+    try:
+        summary = json.loads((state_dir / "fx_positions.json").read_text(encoding="utf-8")).get("positions", [])
+    except (OSError, ValueError):
+        summary = []
+    paper = [p for p in summary if p.get("venue") == "paper"]
+    live = [{"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take}
+            for p in book_from_events(fx_live_log.load()).values()]
+    return paper + live
+
+
+def live_cycle(cloud: Cloud | None, reason: str) -> str:
+    """実際の口座で1回判断して、必要なら発注する（ジョブと同じ部品）。"""
+    from fx_paper import build_ai
+
+    from jqbt.interfaces import fx_runtime as rt
+
+    if cloud:
+        cloud.pull()
+    ctx = rt.build_context(build_ai(), trigger=reason)
+    if ctx is None:
+        result = "市場が閉まっている"
+    else:
+        rt.trade_live(ctx)
+        rt.sync_live()
+        result = "判断した"
+    if cloud:
+        cloud.push()
+    return result
 
 
 async def watch(dry_run: bool) -> None:
     import websockets
 
-    config = WatchConfig()
-    history = PriceHistory(dt.timedelta(minutes=config.window_minutes))
-    cloud = None if dry_run else Cloud()
+    from jqbt.interfaces import fx_runtime as rt
+
+    trades = os.environ.get("FX_WATCH_TRADES", "").lower() == "true" and not dry_run
+    cloud = None if dry_run else Cloud(rt.STATE)
+    history = PriceHistory(dt.timedelta(minutes=CONFIG.window_minutes))
     state = {"started_at": dt.datetime.now(JST).isoformat(timespec="seconds"), "last_tick": None,
-             "reconnects": 0, "wakes": []}
+             "trading": trades, "last_cycle": None, "cycles": 0, "reconnects": 0, "wakes": []}
     positions: list[dict] = []
     last_wake: dt.datetime | None = None
     fired: set[str] = set()
-    last_beat = last_check = 0.0
+    last_beat = last_check = last_positions = 0.0
+    next_periodic = time.monotonic()
+    busy = False
+
+    async def cycle(reason: str) -> None:
+        nonlocal busy
+        busy = True
+        started = time.monotonic()
+        try:
+            result = await asyncio.to_thread(live_cycle, cloud, reason)
+        except Exception as exc:  # noqa: BLE001  1回の失敗で見張りは止めない
+            result = f"失敗: {type(exc).__name__}: {str(exc)[:160]}"
+        finally:
+            busy = False
+        now = dt.datetime.now(JST)
+        state["last_cycle"] = now.isoformat(timespec="seconds")
+        state["cycles"] += 1
+        if reason:
+            state["wakes"] = (state["wakes"] + [{"at": now.isoformat(timespec="seconds"), "reason": reason,
+                                                 "result": f"{result}（{time.monotonic() - started:.0f}秒）"}])[-30:]
+        print(f"{now:%H:%M:%S} {'随時' if reason else '定期'}判断 {reason} → {result}", flush=True)
 
     while True:
         try:
@@ -93,21 +156,25 @@ async def watch(dry_run: bool) -> None:
                     now = dt.datetime.now(JST)
                     history.add(tick["symbol"], now, (float(tick["bid"]) + float(tick["ask"])) / 2)
                     state["last_tick"] = now.isoformat(timespec="seconds")
-                    if time.monotonic() - last_check >= 30:
-                        last_check = time.monotonic()
-                        if cloud and time.monotonic() - last_beat >= 60:
-                            positions = cloud.read_json(POSITIONS_OBJECT).get("positions", [])
-                        reason = reason_to_wake(now, history, positions, config, last_wake=last_wake,
-                                                fired_sessions=fired)
+                    clock = time.monotonic()
+                    if cloud and clock - last_positions >= 60 and not busy:
+                        last_positions = clock
+                        positions = current_positions(rt.STATE)
+                    if clock - last_check >= 1 and not busy:  # 条件は1秒ごと（値段は1秒に約10回届く）
+                        last_check = clock
+                        reason = reason_to_wake(now, history, positions, CONFIG, last_wake=last_wake, fired_sessions=fired)
                         if reason:
                             last_wake = now
-                            result = "（試しに動かしているので起こさない）" if dry_run else cloud.wake(reason)
-                            print(f"{now:%H:%M:%S} {reason} → {result}", flush=True)
-                            state["wakes"] = (state["wakes"] + [{"at": now.isoformat(timespec="seconds"),
-                                                                 "reason": reason, "result": result}])[-30:]
-                    if cloud and time.monotonic() - last_beat >= 60:
-                        last_beat = time.monotonic()
-                        cloud.write_json(STATE_OBJECT, state)
+                            if trades:
+                                asyncio.create_task(cycle(reason))
+                            else:
+                                print(f"{now:%H:%M:%S} {reason} → （売買を担当していないので記録だけ）", flush=True)
+                        elif trades and clock >= next_periodic:
+                            next_periodic = clock + PERIODIC_SECONDS
+                            asyncio.create_task(cycle(""))
+                    if cloud and clock - last_beat >= 60:
+                        last_beat = clock
+                        await asyncio.to_thread(cloud.write_json, "state/fx_watch.json", state)
         except Exception as exc:  # 切れたら、少し待ってつなぎ直す
             state["reconnects"] += 1
             print(f"{dt.datetime.now(JST):%H:%M:%S} 配信が切れました（{type(exc).__name__}: {str(exc)[:120]}）。つなぎ直します",
@@ -119,6 +186,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    from jqbt.infrastructure.env import load_env
+
+    load_env()
     asyncio.run(watch(args.dry_run))
     return 0
 
