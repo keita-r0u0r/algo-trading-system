@@ -616,7 +616,7 @@ def fx_live_controls() -> None:
             (pill("注文を出す設定", "ok") if enabled else pill("注文を出さない設定（記録だけ）", "info")) + " " +
             (pill("キルスイッチ: 入", "bad") if kill.exists() else pill("キルスイッチ: 切", "ok")),
             unsafe_allow_html=True)
-        st.caption("実際に売買する判断する者: AI・金利差＋流れ（ドル円）。実際の口座の状態を見て判断し、1口座100通貨まで、"
+        st.caption("実際に売買する判断する者: AI・金利差＋流れ（ドル円）。実際の口座の状態を見て判断し、状況に応じた数量（1口座1,000通貨まで）で、"
                    "損切りは GMOコイン側に置く。ペーパー運用とは独立。注文を出す設定は infra の fx_live_enabled")
         if kill.exists():
             st.caption(kill.read_text(encoding="utf-8"))
@@ -938,7 +938,7 @@ def compare_body() -> None:
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
         "ペーパーの損益": st.column_config.NumberColumn(format="%+d 円"),
         "実運用の損益": st.column_config.NumberColumn(format="%+d 円")})
-    st.caption("実運用はペーパーと数量（1口座100通貨まで）と約定の値段が違うので、損益の大きさは揃いません。"
+    st.caption("実運用はペーパーと数量（1口座1,000通貨まで）と約定の値段が違うので、損益の大きさは揃いません。"
                "実運用の損益は、決済した分の確定損益（手数料・スワップ込み）と、持っている建玉の含み損益の合計")
 
 

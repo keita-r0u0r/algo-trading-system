@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 import pandas as pd
 
-from ..application.fx_live_trade import Intent, book_from_events
+from ..application.fx_live_trade import Intent, LiveConfig, book_from_events
 from ..application.fx_paper import (
     PaperAccount,
     PaperPosition,
@@ -61,16 +61,28 @@ MAX_GAP_DAYS = 14
 #: 金利差＋流れ・買って持つだけの口座は、検証（fx_multi）と同じく、資金が増減しても1回100通貨で持つ。
 #: 1万円で損切り150 pips なら、1回の損切りで資金の1.5%。枠は「最大」の度合い（上限2.5%）で確かめる
 FIXED_UNITS, CARRY_STOP, HOLD_STOP = 100, 150, 100
+#: 実際の口座で、金利差＋流れの数量を満額にする流れの強さ（終値が50営業日の平均を上回る割合）と、最小の割合
+CARRY_FULL_TREND, CARRY_MIN_SCALE = 0.02, 0.3
+
+
+def carry_scale(closes: list[float]) -> float:
+    """流れの強さ（0.3〜1）。終値が50営業日の平均を CARRY_FULL_TREND 上回れば1。"""
+    if len(closes) < 50:
+        return CARRY_MIN_SCALE
+    average = sum(closes[-50:]) / 50
+    return min(1.0, max(CARRY_MIN_SCALE, (closes[-1] / average - 1) / CARRY_FULL_TREND))
 
 
 #: ルールの口座の売買判断の決まり。判断ごとに、この説明と、そのとき見た数字を記録に残す。
 #: 決まりを変えたら RULES_VERSION を上げる（記録を版ごとに分けて比べるため）
-RULES_VERSION = "rules-v1"
+RULES_VERSION = "rules-v2"
 RULES = {
     "rule_hourly_breakout": "完成した1時間足の終値が、直近20本の高値を上抜けたら買い、安値を下抜けたら売り（ドテン）。"
                             "損切り50 pips、数量は資金の1%（中）から逆算",
     "carry_trend": "前日までの金利差（短期金利の差 − 取り分0.5%）がプラス、かつ前の営業日の終値が50営業日の終値の平均より上なら"
-                   "100通貨を買って持つ。どちらかが崩れたら手仕舞う。損切り150 pips",
+                   "買って持つ。どちらかが崩れたら手仕舞う。損切り150 pips。数量は、ペーパーでは100通貨。"
+                   "実際の口座では、流れの強さ（終値が平均を何%上回るか。2%以上で満額）に応じて、"
+                   "資金の最大5%（30%以上）のリスクから逆算する",
     "buy_and_hold": "ドル円を100通貨買って持つ。損切り100 pips。損切りに掛かったら、次の回に買い直す",
     "no_trade": "一切売買しない（比べる基準）",
 }
@@ -224,6 +236,8 @@ class Context:
     now: dt.datetime
     frame: TradingFrame
     carry_frame: TradingFrame
+    #: 実際の口座の枠（利用者が決めた: 1回の損切りで資金の最大5%・数量は状況に応じて上限1,000通貨）
+    live_frame: TradingFrame
     insts: dict
     quotes: dict
     bars: dict
@@ -248,22 +262,29 @@ def position_signature(account: PaperAccount) -> tuple:
     return () if p is None else (p.symbol, 1 if p.units > 0 else -1)
 
 
-def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict]) -> list[tuple[dict, str, dict]]:
+def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *,
+           live: bool = False) -> list[tuple[dict, str, dict]]:
     """判断する者 ``name`` が、口座 ``account``（ペーパーでも実際でも）の状態を見て判断する。
 
     返すのは (判断, 理由, 記録に足すもの) の並び。枠（core.fx.frame）はまだ通していない。
+    ``live`` なら実際の口座の枠で判断する（数量は状況に応じて決める）。
     """
-    now, quotes, bars, frame = ctx.now, ctx.quotes, ctx.bars, ctx.frame
+    now, quotes, bars = ctx.now, ctx.quotes, ctx.bars
+    frame = ctx.live_frame if live else ctx.frame
     decisions: list[tuple[dict, str, dict]] = []
     if name == "ai":
         if ctx.ai is None or not ctx.ai_due:
             return [({"action": "hold"}, "", {"note": "AI を呼ぶ回ではない（前回から15分たっていない・見張り役が起こしていない）"})] \
                 if ctx.ai is not None else []
-        key = position_signature(account)
+        key = (live, position_signature(account))  # 枠が違えば判断も違うので、ペーパーと実際では使い回さない
         if key in ctx.ai_cache:
             data, extra = ctx.ai_cache[key]
             return [(data, f"AI（同じ状態の判断を使い回し）: {data.get('reasoning', '')}", {**extra, "reused": True})]
         context = ai_context(account, frame, quotes, bars, now, events, ctx.today_rates)
+        if live:
+            context["frame"]["max_units"] = LiveConfig().max_units
+            context["goal"] = ("実際の口座。利用者の目標は1か月で資金1.5倍。数量は risk_fraction（枠の上限まで）で決まる。"
+                               "根拠が強いときは大きく、弱いときは小さく、無いときは hold。枠と損切りは必ず守る")
         if ctx.trigger:
             context["market"]["wake_reason"] = f"見張り役がこの回を起こした理由: {ctx.trigger}"
         try:
@@ -305,14 +326,18 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict]) -
             ctx.closes[sym] = daily_closes(ctx.api, sym, now)
         closes = ctx.closes[sym]
         want = carry_trend_target(closes, carry)
+        scale = carry_scale(closes)
+        risk_fraction = (ctx.live_frame.risk.risk_per_trade * scale if live
+                         else risk_for_units(FIXED_UNITS, CARRY_STOP, account.cash))
         logic = {"rule": RULES["carry_trend"], "version": RULES_VERSION, "symbol": sym,
                  "carry_percent": round(carry, 3) if carry is not None else None,
                  "last_close": round(closes[-1], 3) if closes else None,
                  "average_50d": round(sum(closes[-50:]) / 50, 3) if len(closes) >= 50 else None,
-                 "target": want, "held": int(account.position is not None)}
+                 "target": want, "held": int(account.position is not None),
+                 "trend_scale": round(scale, 2), "risk_fraction": round(risk_fraction, 4)}
         if want == 1 and account.position is None:
             decisions.append(({"action": "open_long", "symbol": sym,
-                               "risk_fraction": risk_for_units(FIXED_UNITS, CARRY_STOP, account.cash),
+                               "risk_fraction": risk_fraction,
                                "stop_pips": CARRY_STOP, "take_pips": 0},
                               f"金利差 {carry:+.2f}% と上向きの流れ", {"logic": logic}))
         elif want == 0 and account.position is not None:
@@ -340,6 +365,7 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
         return None
     frame = TradingFrame(symbols=SYMBOLS, risk=RISK_PROFILES[risk])
     carry_frame = TradingFrame(symbols=SYMBOLS, risk=RISK_PROFILES["max"])
+    live_frame = TradingFrame(symbols=SYMBOLS, risk=RISK_PROFILES["live"])
     insts = instruments(api)
     quotes = {}
     for t in api.ticker():
@@ -357,7 +383,7 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
     for sym in insts:
         gap = (now.date() - held_since[sym]).days + 1 if sym in held_since else 0
         bars[sym] = recent_bars(api, sym, now, min(max(gap, 3), MAX_GAP_DAYS))
-    return Context(api=api, now=now, frame=frame, carry_frame=carry_frame, insts=insts, quotes=quotes, bars=bars,
+    return Context(api=api, now=now, frame=frame, carry_frame=carry_frame, live_frame=live_frame, insts=insts, quotes=quotes, bars=bars,
                    ai=ai, today_rates=rates_summary(now.date()) if ai is not None else {},
                    short=short_rates(now.date()), ai_cache={}, trigger=trigger, ai_due=ai_due(trigger))
 
@@ -489,8 +515,8 @@ def trade_live(ctx: "Context") -> bool:
     intents: list[Intent] = []
     for name in session.config.accounts:
         view = live_view(name, session)
-        account_frame = frame_for(name, ctx)
-        for decision, reason, extra in decide(name, view, ctx, []):
+        account_frame = ctx.live_frame
+        for decision, reason, extra in decide(name, view, ctx, [], live=True):
             equity = session.equity
             approved, rejected = check(
                 decision, account_frame, equity=equity, holding=view.position.symbol if view.position else None,

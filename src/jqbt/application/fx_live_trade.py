@@ -16,14 +16,15 @@
 ## 安全装置（どれか1つでも当てはまれば、新しく建てない。決済はいつでも通す）
 
   * 有効にしていない（``enabled``）、キルスイッチが入っている
-  * 1口座の数量は ``max_units`` まで。まねる口座で、すでに建玉を持っている（損の大きさを入金額より十分小さく保つ）
-  * 取引余力が、必要な証拠金の ``margin_buffer`` 倍に足りない
+  * 1口座の数量は ``max_units`` まで。まねる口座で、すでに建玉を持っている
+  * 取引余力が、必要な証拠金の ``margin_buffer`` 倍に足りない分は数量を減らす。最小の注文数量に届かなければ建てない
   * ``daily_loss_limit`` を決めたときだけ、その日の初めから評価額がその割合だけ減ったら建てない（既定は使わない）
 
 ## 致命的な損失を防ぐ（``is_fatal``）
 
 証拠金維持率が ``fatal_margin_ratio``（%）を下回ったら、全部の建玉を成行で決済し、キルスイッチを入れる。
 GMOコインのロスカットは100%だが、急変ではロスカットの値段を飛び越えて入金額を超える損が出うるので、その手前で降りる。
+ふだんの損は、損切り（1回で資金の最大5%）で先に止まる。
 """
 
 from __future__ import annotations
@@ -38,15 +39,18 @@ class LiveConfig:
     enabled: bool = False
     #: まねる口座（ペーパー運用の口座の名前）
     accounts: tuple[str, ...] = ("ai", "carry_trend_USD_JPY")
-    #: 1口座あたりの数量の上限（通貨）。ペーパー運用がこれより大きく建てても、ここで切る
-    max_units: int = 100
+    #: 1口座あたりの数量の上限（通貨）。判断する者が状況に応じて決めた数量を、ここで切る（利用者が決めた: 1,000）
+    max_units: int = 1_000
+    #: 最小の注文数量（GMOコインは各通貨ペア100通貨）
+    min_units: int = 100
     #: その日の初めから評価額がこの割合だけ減ったら、その日は新しく建てない。None なら使わない（既定。
     #: 利用者の方針: 致命的でない損失では止めない）
     daily_loss_limit: float | None = None
     #: 証拠金維持率（%）がこれを下回ったら、全部決済してキルスイッチ（致命的な損失＝不足金を防ぐ）
-    fatal_margin_ratio: float = 150.0
-    #: 取引余力が、必要な証拠金（新規は20倍）のこの倍数に足りなければ建てない
-    margin_buffer: float = 1.5
+    #: 1,000通貨（約15倍）では、維持率150%は損切りより手前に来てしまうので、ロスカット（100%）の少し手前にする
+    fatal_margin_ratio: float = 110.0
+    #: 取引余力が、必要な証拠金（新規は20倍）のこの倍数に足りない分は数量を減らす
+    margin_buffer: float = 1.2
     leverage_for_entry: float = 20.0
 
 
@@ -163,7 +167,7 @@ def plan(
             continue
         if intent.action != "open":
             continue
-        size = min(int(abs(intent.units)), config.max_units)
+        size = min(int(abs(intent.units)), config.max_units, _affordable(intent.symbol, available, config, prices))
         reason = _blocked(account, intent.symbol, size, book, config, killed, equity, day_start_equity, available, prices)
         if not reason and not intent.stop_pips:
             reason = "損切りの無い判断は、実際の口座では建てない"
@@ -186,13 +190,17 @@ def _blocked(account, symbol, size, book, config, killed, equity, day_start_equi
         return "この口座は、実際の建玉をもう持っている"
     if config.daily_loss_limit and day_start_equity and equity <= day_start_equity * (1 - config.daily_loss_limit):
         return f"今日の損失が上限（{config.daily_loss_limit:.0%}）に届いた"
-    price = prices.get(symbol) or 0.0
-    needed = size * price / config.leverage_for_entry * config.margin_buffer
-    if available < needed:
-        return f"取引余力が足りない（{available:,.0f}円 < {needed:,.0f}円）"
-    if size < 1:
-        return "数量が0"
+    if size < config.min_units:
+        return f"取引余力の範囲の数量（{size}通貨）が最小の注文数量（{config.min_units}通貨）に届かない（余力 {available:,.0f}円）"
     return ""
+
+
+def _affordable(symbol: str, available: float, config: LiveConfig, prices: dict[str, float]) -> int:
+    """取引余力で建てられる数量（必要な証拠金の margin_buffer 倍まで）。"""
+    price = prices.get(symbol) or 0.0
+    if price <= 0:
+        return 0
+    return max(0, int(available / (price / config.leverage_for_entry * config.margin_buffer)))
 
 
 def stop_take_prices(side: str, fill: float, stop_pips: float, take_pips: float | None, pip: float = 0.01) -> tuple[float, float | None]:
