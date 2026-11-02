@@ -1,6 +1,6 @@
 """FX の前向きのペーパー運用を1回進める。**注文は出さない**（仮想の約定だけ）。
 
-  python scripts/fx_paper.py            # 1回進める（Cloud Run では1時間に1回、自動で呼ばれる）
+  python scripts/fx_paper.py            # 1回進める（Cloud Run では定期的に自動で呼ばれる。今は15分ごと）
   python scripts/fx_paper.py --status   # 口座の状態を見るだけ
 
 口座は判断する者ごとに分かれ、同じ時刻・同じ値段で並ぶ。
@@ -178,7 +178,8 @@ def ai_context(account: PaperAccount, frame: TradingFrame, quotes: dict, bars: d
         "now_jst": now.strftime("%Y-%m-%d %H:%M (%a)"),
         "rates_2y_percent": today_rates,
         "symbols": {},
-        "note": "hourly_close は完成した1時間足の仲値の終値（古い順、直近48本）。daily_range_pips は営業日ごとの値幅",
+        "note": "hourly_close は完成した1時間足の仲値の終値（古い順、直近48本）。recent_5min_close は直近2時間の"
+                "5分足の終値（古い順、24本）。daily_range_pips は営業日ごとの値幅",
     }
     for sym in frame.symbols:
         if sym not in quotes or sym not in bars:
@@ -188,6 +189,8 @@ def ai_context(account: PaperAccount, frame: TradingFrame, quotes: dict, bars: d
         market["symbols"][sym] = {
             "bid": quotes[sym]["bid"], "ask": quotes[sym]["ask"], "spread_pips": round(quotes[sym]["spread"], 2),
             "hourly_close": [round(float(v), 3) for v in h["close"].tail(48)],
+            "recent_5min_close": [round(float(v), 3) for v in
+                                  bars[sym]["close"].resample("5min").last().dropna().tail(24)],
             "daily_range_pips": [round(float((g["high"].max() - g["low"].min()) / 0.01), 1) for _, g in sessions][-5:],
         }
     return {
