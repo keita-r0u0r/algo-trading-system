@@ -145,3 +145,29 @@ def fx_summary_cards(summary: dict[str, Any]) -> list[dict[str, str]]:
         {"label": "ロスカット", "value": "あり" if summary["losscut"] else "なし",
          "note": "見送り " + str(summary.get("skipped_entries", 0)) + "回"},
     ]
+
+
+#: FX のペーパー運用の口座の、画面に出す名前
+ACCOUNT_LABELS = {
+    "ai": "AI",
+    "rule_hourly_breakout": "1時間足の突破",
+    "buy_and_hold": "買って持つだけ",
+    "no_trade": "一切売買しない",
+}
+PAIR_LABELS = {"USD_JPY": "ドル円", "EUR_JPY": "ユーロ円", "GBP_JPY": "ポンド円", "AUD_JPY": "豪ドル円"}
+
+
+def account_label(name: str) -> str:
+    """口座の内部の名前を、画面に出す名前にする（知らない名前はそのまま）。"""
+    if name in ACCOUNT_LABELS:
+        return ACCOUNT_LABELS[name]
+    if name.startswith("carry_trend_"):
+        pair = name.removeprefix("carry_trend_")
+        return f"金利差＋流れ（{PAIR_LABELS.get(pair, pair)}）"
+    return name
+
+
+def account_kind(name: str) -> str:
+    if name == "ai":
+        return "AI"
+    return "基準" if name in ("buy_and_hold", "no_trade") else "機械"
