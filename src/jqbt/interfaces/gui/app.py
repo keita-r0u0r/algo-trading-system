@@ -441,6 +441,55 @@ def page_fx_lab() -> None:
 
 
 
+def page_fx_live() -> None:
+    header("実際の約定", "GMOコインの口座から読んだ約定・建玉・資産。読むだけで、注文は出していません")
+    from jqbt.application.fx_live import summarize
+    from jqbt.infrastructure import fx_live_log
+
+    events = fx_live_log.load()
+    if not events:
+        st.info("まだ記録がありません。ペーパー運用と一緒に15分ごとに読みます（手元では scripts/fx_live_sync.py）",
+                icon=":material/hourglass_empty:")
+        return
+    errors = [e for e in events if e.get("kind") == "error"]
+    if errors:
+        st.warning("読めなかったものがあります（最後の回）: " + " / ".join(errors[-1]["errors"])
+                   + "。ERR-5012 は、APIキーの照会の権限が足りないときに出ます（GMOコインの API キーの設定で、約定・建玉の照会を許可する。注文の権限は要りません）",
+                   icon=":material/lock:")
+    snapshots = [e for e in events if e.get("kind") == "snapshot"]
+    last = snapshots[-1] if snapshots else {}
+    assets = last.get("assets")
+    assets = (assets[0] if isinstance(assets, list) and assets else assets) or {}
+    executions = [e for e in events if e.get("kind") == "execution"]
+    summary = summarize(executions)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("評価額", f"{float(assets.get('equity') or 0):,.0f} 円")
+    c2.metric("確定した損益（手数料・スワップ込み）",
+              f"{summary['loss_gain'] - summary['fee'] + summary['swap']:+,.0f} 円")
+    c3.metric("約定", f"{summary['executions']} 件（決済 {summary['closed']}）")
+    c4.metric("ずれの平均（不利な側が正）",
+              f"{summary['slippage_avg']:+.2f} pips" if summary["slippage_avg"] is not None else "—")
+    with st.container(border=True):
+        st.markdown("**建玉**")
+        positions = last.get("positions") or []
+        if positions:
+            st.dataframe(pd.DataFrame(positions), hide_index=True, width="stretch")
+        else:
+            st.caption("持っていません" if "positions" in last else "読めていません")
+    with st.container(border=True):
+        st.markdown("**約定**")
+        if executions:
+            st.dataframe(pd.DataFrame([{
+                "時刻": e["at"][5:16].replace("T", " "), "通貨": e.get("symbol"), "売買": e.get("side"),
+                "新規/決済": e.get("settleType"), "数量": float(e.get("size") or 0), "値段": float(e.get("price") or 0),
+                "ずれ（pips）": e.get("slippage_pips"), "損益": float(e.get("lossGain") or 0),
+                "手数料": float(e.get("fee") or 0), "スワップ": float(e.get("settledSwap") or 0),
+            } for e in reversed(executions)]), hide_index=True, width="stretch")
+        else:
+            st.caption("まだありません")
+    st.caption(f"最後に読んだ時刻: {last.get('at', '—')}。ずれは、約定した1分足の始まりの買値・売値との差（目安）")
+
+
 # ----------------------------------------------------------------------
 # 国内株
 # ----------------------------------------------------------------------
@@ -738,6 +787,7 @@ ext_pages = [st.Page(extension_page(page.render, page.title), title=page.title, 
 navigation = st.navigation({
     "": [st.Page(page_home, title="概要", icon=":material/dashboard:", default=True)],
     "FX": [st.Page(page_fx_paper, title="ペーパー運用", icon=":material/show_chart:", url_path="fx-paper"),
+           st.Page(page_fx_live, title="実際の約定", icon=":material/account_balance_wallet:", url_path="fx-live"),
            st.Page(page_fx_lab, title="検証（ダミー）", icon=":material/science:", url_path="fx-lab")],
     "国内株": [st.Page(page_today, title="今日", icon=":material/today:", url_path="stocks"),
             st.Page(page_signals, title="売買候補と約定", icon=":material/receipt_long:", url_path="signals"),

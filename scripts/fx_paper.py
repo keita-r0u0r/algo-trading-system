@@ -31,6 +31,7 @@ from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pandas as pd  # noqa: E402
 
@@ -374,6 +375,16 @@ def main() -> int:
         accounts[name] = account = replace(account, equity=equity)
         new_events.append({"kind": "snapshot", "account": name, "at": now.isoformat(), "state": account.to_dict()})
     fx_paper_log.append(new_events)
+
+    # 実際の約定・建玉・資産も読んで記録する（読むだけ。失敗してもペーパー運用は止めない）
+    try:
+        from fx_live_sync import sync
+
+        live = sync(quiet=True)
+        if live["new"] or live["errors"]:
+            print(f"  実際の約定: 新しく {live['new']} 件" + (f"（読めなかったもの {len(live['errors'])} 件）" if live["errors"] else ""))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  実際の約定を読めませんでした: {type(exc).__name__}")
 
     print(f"{now:%Y-%m-%d %H:%M} 日本時間 / リスクの度合い {args.risk}（ペーパー運用。注文は出していません）")
     for e in new_events:
