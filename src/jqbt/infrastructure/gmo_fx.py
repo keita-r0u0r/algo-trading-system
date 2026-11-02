@@ -95,3 +95,20 @@ class GmoFxClient:
     def assets(self) -> dict[str, Any] | list[dict[str, Any]]:
         """資産（評価額・証拠金・証拠金維持率など）。"""
         return self._private_get("/v1/account/assets")
+
+    def latest_executions(self, symbol: str, count: int = 100) -> list[dict[str, Any]]:
+        """直近1日の約定（最大100件、新しい順）。手数料・確定した損益・スワップを含む。"""
+        data = self._private_get("/v1/latestExecutions", {"symbol": symbol, "count": str(count)})
+        return list(data.get("list", [])) if isinstance(data, dict) else list(data or [])
+
+    def open_positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        """今持っている建玉（最大100件）。"""
+        params = {"symbol": symbol} if symbol else None
+        data = self._private_get("/v1/openPositions", params)
+        return list(data.get("list", [])) if isinstance(data, dict) else list(data or [])
+
+    def position_summary(self) -> list[dict[str, Any]]:
+        """通貨ペア・売り買いごとの建玉の合計と、評価損益。"""
+        data = self._private_get("/v1/positionSummary")
+        return list(data.get("list", [])) if isinstance(data, dict) else list(data or [])
+
