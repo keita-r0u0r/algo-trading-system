@@ -474,3 +474,129 @@ resource "google_compute_router_nat" "egress" {
   nat_ips                            = [google_compute_address.egress[0].self_link]
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }
+
+# --- 値段の見張り役（常時動く小さな仮想マシン） ------------------------------------------
+# GMOコインの値段の配信を受け取り続け、急変などのときだけ判断の回（fx_paper のジョブ）を起こす。
+# 無料の枠がある us-central1 の e2-micro。値段を見るだけで、注文用のキーは持たない
+
+resource "google_service_account" "watcher" {
+  count        = var.fx_watch_enabled ? 1 : 0
+  account_id   = "${local.name}-watcher"
+  display_name = "algo-trading: 値段の見張り役"
+}
+
+resource "google_cloud_run_v2_job_iam_member" "watcher_runs_job" {
+  # 「起こした理由」をジョブに渡す（実行時の上書き）ため、invoker ではなく developer
+  count    = var.fx_watch_enabled && length(google_cloud_run_v2_job.fx_paper) > 0 ? 1 : 0
+  name     = google_cloud_run_v2_job.fx_paper[0].name
+  location = var.region
+  role     = "roles/run.developer"
+  member   = google_service_account.watcher[0].member
+}
+
+resource "google_storage_bucket_iam_member" "watcher_state" {
+  count  = var.fx_watch_enabled ? 1 : 0
+  bucket = google_storage_bucket.state.name
+  role   = "roles/storage.objectUser"
+  member = google_service_account.watcher[0].member
+}
+
+resource "google_artifact_registry_repository_iam_member" "watcher_pull" {
+  count      = var.fx_watch_enabled ? 1 : 0
+  repository = google_artifact_registry_repository.images.name
+  location   = var.region
+  role       = "roles/artifactregistry.reader"
+  member     = google_service_account.watcher[0].member
+}
+
+resource "google_project_iam_member" "watcher_logs" {
+  count   = var.fx_watch_enabled ? 1 : 0
+  project = var.project
+  role    = "roles/logging.logWriter"
+  member  = google_service_account.watcher[0].member
+}
+
+resource "google_compute_network" "watch" {
+  count                   = var.fx_watch_enabled ? 1 : 0
+  name                    = "${local.name}-watch"
+  auto_create_subnetworks = false
+  depends_on              = [google_project_service.apis]
+}
+
+resource "google_compute_subnetwork" "watch" {
+  count         = var.fx_watch_enabled ? 1 : 0
+  name          = "${local.name}-watch"
+  region        = "us-central1"
+  network       = google_compute_network.watch[0].id
+  ip_cidr_range = "10.9.0.0/28"
+}
+
+# イメージの版が変わったら、仮想マシンを作り直して新しい版で動かす
+resource "terraform_data" "watcher_image" {
+  input = var.image_tag
+}
+
+resource "google_compute_instance" "watcher" {
+  count        = var.fx_watch_enabled && var.image_tag != "" ? 1 : 0
+  name         = "${local.name}-watcher"
+  zone         = "us-central1-a"
+  machine_type = "e2-micro"
+
+  boot_disk {
+    initialize_params {
+      image = "cos-cloud/cos-stable"
+      size  = 10
+      type  = "pd-standard"
+    }
+  }
+
+  network_interface {
+    subnetwork = google_compute_subnetwork.watch[0].id
+    access_config {} # 外に出る（値段の配信・GCP の API）
+  }
+
+  service_account {
+    email  = google_service_account.watcher[0].email
+    scopes = ["cloud-platform"]
+  }
+
+  metadata = {
+    google-logging-enabled = "true"
+    user-data              = <<-EOT
+      #cloud-config
+      write_files:
+      - path: /etc/systemd/system/fx-watch.service
+        permissions: "0644"
+        content: |
+          [Unit]
+          Description=FX price watcher
+          Wants=network-online.target
+          After=network-online.target
+          [Service]
+          Environment="HOME=/home/watcher"
+          ExecStartPre=/bin/mkdir -p /home/watcher
+          ExecStartPre=/usr/bin/docker-credential-gcr configure-docker --registries ${var.region}-docker.pkg.dev
+          ExecStart=/usr/bin/docker run --rm --name=fx-watch --log-driver=gcplogs \
+            -e GCP_PROJECT=${var.project} -e STATE_BUCKET=${google_storage_bucket.state.name} \
+            -e FX_JOB_NAME=${local.name}-fx-paper -e FX_JOB_REGION=${var.region} \
+            ${local.image}:${var.image_tag} python scripts/fx_watch.py
+          ExecStop=/usr/bin/docker stop fx-watch
+          Restart=always
+          RestartSec=15
+          [Install]
+          WantedBy=multi-user.target
+      runcmd:
+      - systemctl daemon-reload
+      - systemctl enable --now fx-watch.service
+    EOT
+  }
+
+  allow_stopping_for_update = true
+  lifecycle {
+    replace_triggered_by = [terraform_data.watcher_image]
+  }
+  depends_on = [
+    google_storage_bucket_iam_member.watcher_state,
+    google_artifact_registry_repository_iam_member.watcher_pull,
+  ]
+}

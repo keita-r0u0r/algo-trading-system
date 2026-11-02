@@ -18,6 +18,8 @@ gui = ["streamlit>=1.40"]
 gcp = ["google-cloud-secret-manager>=2.20"]
 # 拡張パーツ: AI（Claude）。JQBT_EXTENSIONS=ai で有効にする（docs/ai.md）
 ai = ["anthropic[vertex]>=1.15", "google-genai>=2.0"]
+# 値段の見張り役（scripts/fx_watch.py）。GMOコインの値段の配信（WebSocket）を受け取る
+watch = ["websockets>=12"]
 
 [build-system]
 requires = ["setuptools>=68"]

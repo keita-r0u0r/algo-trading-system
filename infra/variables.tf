@@ -71,3 +71,9 @@ variable "fx_live_enabled" {
   type        = bool
   default     = false
 }
+
+variable "fx_watch_enabled" {
+  description = "値段の見張り役（us-central1 の e2-micro。本体は無料の枠、外向きの IP は有料）を動かす"
+  type        = bool
+  default     = false
+}
