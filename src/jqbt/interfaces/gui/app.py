@@ -211,14 +211,79 @@ def fx_events() -> list[dict]:
     return fx_paper_log.load()
 
 
-def account_rows(events: list[dict]) -> list[dict]:
+JST = dt.timezone(dt.timedelta(hours=9))
+REFRESH_CHOICES = {"止める": None, "10秒": 10, "30秒": 30, "60秒": 60}
+
+
+def refresh_seconds() -> int | None:
+    """画面の自動更新の間隔（サイドバーで選ぶ）。"""
+    return REFRESH_CHOICES.get(st.session_state.get("refresh", "30秒"))
+
+
+def live(render):
+    """表とグラフの部分だけを、選んだ間隔で描き直す（ページ全体は読み込み直さない）。"""
+    return st.fragment(run_every=refresh_seconds())(render)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def quotes() -> dict[str, dict[str, float]]:
+    """今の値段（GMOコインの公開の値段。5秒ごとに取り直す）。取れなければ空。"""
+    from jqbt.infrastructure.gmo_fx import GmoFxClient
+
+    try:
+        return {t["symbol"]: {"bid": float(t["bid"]), "ask": float(t["ask"])}
+                for t in GmoFxClient().ticker() if t["symbol"] in vm.PAIR_LABELS}
+    except Exception:  # 値段が取れなくても、記録は見せる
+        return {}
+
+
+def price_strip(prices: dict[str, dict[str, float]]) -> None:
+    """今の値段の帯。"""
+    if not prices:
+        st.caption("今の値段を取れませんでした（記録の値で表示しています）")
+        return
+    columns = st.columns(len(prices))
+    for column, (symbol, q) in zip(columns, prices.items()):
+        mid = (q["bid"] + q["ask"]) / 2
+        column.metric(vm.PAIR_LABELS.get(symbol, symbol), f"{mid:,.3f}",
+                      f"スプレッド {(q['ask'] - q['bid']) / 0.01:.1f} pips", delta_color="off", delta_arrow="off")
+    every = refresh_seconds()
+    st.caption(f"{dt.datetime.now(JST):%H:%M:%S} 時点の値段" + (f"・{every}秒ごとに更新" if every else "・自動更新は止めています")
+               + "。評価額と含み損益は、今の値段で評価し直しています（売買の判断と記録は15分ごと）")
+
+
+def marked_equity(state: dict, prices: dict[str, dict[str, float]]) -> float:
+    """今の値段で評価した口座の額（建玉の含み損益を含む。手仕舞いの値段＝買いは売値、売りは買値）。"""
+    position = state.get("position")
+    if not position or position["symbol"] not in prices:
+        return state.get("equity") or state["cash"]
+    q = prices[position["symbol"]]
+    exit_price = q["bid"] if position["units"] > 0 else q["ask"]
+    return state["cash"] + (exit_price - position["price"]) * position["units"]
+
+
+def live_curve(events: list[dict], prices: dict[str, dict[str, float]]) -> pd.DataFrame:
+    """評価額の推移。最後に「今」の点を足して、グラフを今の値段まで伸ばす。"""
+    from jqbt.infrastructure import fx_paper_log
+
+    curve = [{"時刻": pd.Timestamp(e["at"]), "口座": vm.account_label(e["account"]),
+              "評価額": e["state"].get("equity") or e["state"]["cash"]}
+             for e in events if e.get("kind") == "snapshot"]
+    if prices and curve:
+        now = pd.Timestamp(dt.datetime.now(JST))
+        curve += [{"時刻": now, "口座": vm.account_label(name), "評価額": marked_equity(state, prices)}
+                  for name, state in fx_paper_log.latest_snapshots(events).items()]
+    return pd.DataFrame(curve)
+
+
+def account_rows(events: list[dict], prices: dict[str, dict[str, float]] | None = None) -> list[dict]:
     from jqbt.infrastructure import fx_paper_log
 
     rows = []
     for name, state in fx_paper_log.latest_snapshots(events).items():
         closes = [e for e in events if e.get("kind") == "close" and e.get("account") == name]
         position = state.get("position")
-        equity = state.get("equity") or state["cash"]
+        equity = marked_equity(state, prices or {})
         rows.append({
             "口座": vm.account_label(name),
             "id": name,
@@ -235,9 +300,15 @@ def account_rows(events: list[dict]) -> list[dict]:
 
 
 def page_home() -> None:
-    header("概要", "FX のペーパー運用（仮想の約定）の今と、システムの状態。注文は出していません")
+    header("概要", "FX のペーパー運用（仮想の約定）の今と、システムの状態")
+    live(home_body)()
+
+
+def home_body() -> None:
+    prices = quotes()
+    price_strip(prices)
     events = fx_events()
-    rows = account_rows(events)
+    rows = account_rows(events, prices)
     if not rows:
         st.info("まだ記録がありません。ペーパー運用が始まると、ここに口座の成績が出ます", icon=":material/hourglass_empty:")
         return
@@ -256,9 +327,7 @@ def page_home() -> None:
     with left:
         with st.container(border=True):
             st.markdown("**評価額の推移**")
-            curve = pd.DataFrame([{"時刻": pd.Timestamp(e["at"]), "口座": vm.account_label(e["account"]),
-                                   "評価額": e["state"].get("equity") or e["state"]["cash"]}
-                                  for e in events if e.get("kind") == "snapshot"])
+            curve = live_curve(events, prices)
             if len(curve) > 1:
                 chart = (alt.Chart(curve).mark_line(strokeWidth=2)
                          .encode(x=alt.X("時刻:T", title=None),
@@ -294,14 +363,46 @@ def page_home() -> None:
 # ----------------------------------------------------------------------
 # FX
 # ----------------------------------------------------------------------
+PAUSE_PAPER = ROOT / "state" / "PAUSE_fx_paper"
+
+
+def paper_switch() -> None:
+    """ペーパー運用の ON/OFF。止めている間は、判断も仮想の約定もしない（自動売買も新しく建てない）。"""
+    running = not PAUSE_PAPER.exists()
+    left, right = st.columns([3, 2])
+    with left:
+        st.markdown(pill("ペーパー運用: 動いている", "ok") if running else pill("ペーパー運用: 止めている", "warn"),
+                    unsafe_allow_html=True)
+        st.caption("止めている間は、15分ごとの回で判断も仮想の約定もしません。自動売買も新しく建てません"
+                   "（実際の口座の照会と記録は続け、持っている建玉は GMOコイン側の損切りで守られます）")
+    with right:
+        if running:
+            if st.button("ペーパー運用を止める", icon=":material/pause:", width="stretch"):
+                PAUSE_PAPER.parent.mkdir(parents=True, exist_ok=True)
+                PAUSE_PAPER.write_text(f"{dt.datetime.now(JST).isoformat(timespec='seconds')} 画面から止めた",
+                                       encoding="utf-8")
+                flash("ペーパー運用を止めました（次の回から）", "warning")
+        elif st.button("ペーパー運用を再開する", type="primary", icon=":material/play_arrow:", width="stretch"):
+            PAUSE_PAPER.unlink(missing_ok=True)
+            flash("ペーパー運用を再開しました（次の回から）")
+
+
 def page_fx_paper() -> None:
     header("ペーパー運用", "AI・機械（ルール）・基準の口座を、同じ時刻・同じ値段で並べた仮想の運用。注文は出していません")
+    show_flash()
+    paper_switch()
+    live(fx_paper_body)()
+
+
+def fx_paper_body() -> None:
+    prices = quotes()
+    price_strip(prices)
     events = fx_events()
     if not events:
         st.info("まだ記録がありません。scripts/fx_paper.py を実行すると始まります（Cloud Run では1時間に1回）",
                 icon=":material/hourglass_empty:")
         return
-    rows = account_rows(events)
+    rows = account_rows(events, prices)
     groups = {kind: [r for r in rows if r["種類"] == kind] for kind in ("AI", "機械", "基準")}
     c1, c2, c3 = st.columns(3)
     for column, kind in zip((c1, c2, c3), ("AI", "機械", "基準")):
@@ -318,9 +419,7 @@ def page_fx_paper() -> None:
         })
     with st.container(border=True):
         st.markdown("**評価額の推移**")
-        curve = pd.DataFrame([{"時刻": pd.Timestamp(e["at"]), "口座": vm.account_label(e["account"]),
-                               "評価額": e["state"].get("equity") or e["state"]["cash"]}
-                              for e in events if e.get("kind") == "snapshot"])
+        curve = live_curve(events, prices)
         if len(curve) > 1:
             chart = (alt.Chart(curve).mark_line(strokeWidth=2)
                      .encode(x=alt.X("時刻:T", title=None), y=alt.Y("評価額:Q", scale=alt.Scale(zero=False), title=None),
@@ -444,6 +543,11 @@ def page_fx_lab() -> None:
 def page_fx_live() -> None:
     header("実際の約定", "GMOコインの口座の約定・建玉・資産と、自動売買の記録")
     show_flash()
+    live(fx_live_body)()
+    fx_live_controls()
+
+
+def fx_live_body() -> None:
     from jqbt.application.fx_live import summarize
     from jqbt.infrastructure import fx_live_log
 
@@ -496,10 +600,12 @@ def page_fx_live() -> None:
             st.caption("まだありません")
     st.caption(f"最後に読んだ時刻: {last.get('at', '—')}。ずれは、約定した1分足の始まりの買値・売値との差（目安）")
 
-    # 自動売買（実際のお金）
+
+
+def fx_live_controls() -> None:
+    """自動売買の状態とキルスイッチ（ボタンがあるので、自動更新の外に置く）。"""
     st.subheader("自動売買")
     kill = ROOT / "state" / "KILL_fx_live"
-    live = [e for e in events if str(e.get("kind", "")).startswith("live_")]
     enabled = os.environ.get("FX_LIVE_ENABLED", "").lower() == "true"
     c1, c2 = st.columns([3, 2])
     with c1:
@@ -521,16 +627,24 @@ def page_fx_live() -> None:
             kill.parent.mkdir(parents=True, exist_ok=True)
             kill.write_text(f"{dt.datetime.now().isoformat(timespec='seconds')} 画面から止めた", encoding="utf-8")
             flash("キルスイッチを入れました。新しい注文は出しません（決済は出します）", "warning")
+    live(fx_live_trades)()
+
+
+def fx_live_trades() -> None:
+    from jqbt.infrastructure import fx_live_log
+
+    events = fx_live_log.load()
+    live_events = [e for e in events if str(e.get("kind", "")).startswith("live_")]
     with st.container(border=True):
         st.markdown("**自動売買の記録**")
-        if live:
+        if live_events:
             st.dataframe(pd.DataFrame([{
                 "時刻": e.get("at", "")[5:16].replace("T", " "), "種類": e["kind"].removeprefix("live_"),
                 "口座": vm.account_label(e.get("account", "")), "通貨": e.get("symbol", ""),
                 "建玉ID": e.get("position_id"), "値段": e.get("price"),
                 "内容": e.get("reason") or e.get("error") or e.get("note") or
                         (f"損切り {e.get('stop')} / 利確 {e.get('take')}" if e["kind"] == "live_protect" else ""),
-            } for e in reversed(live)][:100]), hide_index=True, width="stretch")
+            } for e in reversed(live_events)][:100]), hide_index=True, width="stretch")
         else:
             st.caption("まだありません")
 
@@ -843,6 +957,10 @@ navigation = st.navigation({
 })
 
 with st.sidebar:
+    st.segmented_control("画面の自動更新", list(REFRESH_CHOICES), key="refresh", default="30秒")
+    if st.button("今すぐ更新", icon=":material/refresh:", width="stretch"):
+        quotes.clear()
+        st.rerun()
     st.selectbox("国内株の台帳", ["paper", "live"], key="profile",
                  format_func=lambda p: "ペーパー（仮想の約定）" if p == "paper" else "実運用（実際の約定を記録）")
     st.caption(DISCLAIMER)
