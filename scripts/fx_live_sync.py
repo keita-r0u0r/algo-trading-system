@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import httpx  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from jqbt.application.fx_live import new_executions, slippage_pips  # noqa: E402
@@ -35,7 +36,7 @@ def quote_at(api: GmoFxClient, symbol: str, at: dt.datetime, cache: dict) -> tup
         if key not in cache:
             try:
                 cache[key] = fetch_day(api, symbol, day)
-            except GmoError:
+            except (GmoError, httpx.HTTPError):  # まだ始まっていない日（深夜0時〜朝）など。ずれは出さずに進む
                 cache[key] = pd.DataFrame()
         bars = cache[key]
         if not bars.empty and minute in bars.index:
