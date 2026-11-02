@@ -58,3 +58,11 @@ def test_ai_due_interval_and_trigger(state):
     assert rt.ai_due("USD_JPY が急変")  # 起こされた回は必ず呼ぶ
     (state / "fx_ai_last").write_text(ago(rt.AI_INTERVAL_SECONDS))
     assert rt.ai_due("")
+
+
+@pytest.mark.parametrize(("last", "expected"), [(100.0, rt.CARRY_MIN_SCALE), (101.0, 0.5), (103.0, 1.0), (110.0, 1.0)])
+def test_carry_scale_grows_with_trend(last, expected):
+    closes = [100.0] * 49 + [last]
+    average = sum(closes) / 50
+    assert rt.carry_scale(closes) == pytest.approx(min(1.0, max(rt.CARRY_MIN_SCALE, (last / average - 1) / 0.02)))
+    assert rt.carry_scale(closes) == pytest.approx(expected, abs=0.02)

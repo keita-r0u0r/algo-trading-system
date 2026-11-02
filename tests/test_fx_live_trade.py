@@ -36,11 +36,23 @@ def run_plan(events, book=None, config=ON, **kw):
 
 
 # --- 計画と安全装置 ------------------------------------------------------------
-def test_open_is_capped_to_max_units_and_keeps_stop_and_take_distance():
+def test_open_keeps_decided_size_and_stop_and_take_distance():
     [action] = run_plan([OPEN_AI])
     assert isinstance(action, Open)
-    assert action.size == 100  # ペーパーの250通貨を100通貨に切る
+    assert action.size == 250  # 判断する者が決めた数量（上限1,000の内側）
     assert action.side == "BUY" and action.stop_pips == 25.0 and action.take_pips == 50.0
+
+
+def test_open_is_capped_to_max_units():
+    big = Intent(**{**OPEN_AI.__dict__, "units": 5_000.0})
+    [action] = run_plan([big], available=100_000.0)
+    assert isinstance(action, Open) and action.size == 1_000
+
+
+def test_open_shrinks_to_available_margin():
+    big = Intent(**{**OPEN_AI.__dict__, "units": 1_000.0})
+    [action] = run_plan([big], available=5_000.0)  # 158円 ÷ 20倍 × 1.2 = 9.48円/通貨 → 527通貨
+    assert isinstance(action, Open) and action.size == 527
 
 
 def test_nothing_is_ordered_unless_enabled():
@@ -183,5 +195,5 @@ def test_fatal_only_when_positions_and_margin_ratio_low():
 
     assert is_fatal({"equity": "10000", "marginRatio": "100"}, has_positions=False, config=ON) == ""
     assert is_fatal({"equity": "10000", "marginRatio": "790"}, has_positions=True, config=ON) == ""
-    assert "証拠金維持率" in is_fatal({"equity": "1500", "marginRatio": "120"}, has_positions=True, config=ON)
+    assert "証拠金維持率" in is_fatal({"equity": "1500", "marginRatio": "105"}, has_positions=True, config=ON)
     assert "0以下" in is_fatal({"equity": "-50", "marginRatio": "0"}, has_positions=True, config=ON)

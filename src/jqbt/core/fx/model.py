@@ -219,6 +219,9 @@ RISK_PROFILES = {
     "small": RiskProfile("small", risk_per_trade=0.005, max_leverage=2, daily_loss_limit=0.02),
     "medium": RiskProfile("medium", risk_per_trade=0.01, max_leverage=5, daily_loss_limit=0.04),
     "max": RiskProfile("max", risk_per_trade=0.025, max_leverage=20, daily_loss_limit=0.10),
+    #: 実際の口座（利用者が決めた: 1か月で1.5倍を目指す。数量は状況に応じて、上限1,000通貨は LiveConfig で切る）。
+    #: 1日の損失の上限は実際の口座では使わない（致命的な損失だけで止める）
+    "live": RiskProfile("live", risk_per_trade=0.05, max_leverage=20, daily_loss_limit=0.20),
 }
 
 
