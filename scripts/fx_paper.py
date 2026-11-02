@@ -65,6 +65,19 @@ MAX_GAP_DAYS = 14
 FIXED_UNITS, CARRY_STOP, HOLD_STOP = 100, 150, 100
 
 
+#: ルールの口座の売買判断の決まり。判断ごとに、この説明と、そのとき見た数字を記録に残す。
+#: 決まりを変えたら RULES_VERSION を上げる（記録を版ごとに分けて比べるため）
+RULES_VERSION = "rules-v1"
+RULES = {
+    "rule_hourly_breakout": "完成した1時間足の終値が、直近20本の高値を上抜けたら買い、安値を下抜けたら売り（ドテン）。"
+                            "損切り50 pips、数量は資金の1%（中）から逆算",
+    "carry_trend": "前日までの金利差（短期金利の差 − 取り分0.5%）がプラス、かつ前の営業日の終値が50営業日の終値の平均より上なら"
+                   "100通貨を買って持つ。どちらかが崩れたら手仕舞う。損切り150 pips",
+    "buy_and_hold": "ドル円を100通貨買って持つ。損切り100 pips。損切りに掛かったら、次の回に買い直す",
+    "no_trade": "一切売買しない（比べる基準）",
+}
+
+
 def risk_for_units(units: float, stop_pips: float, equity: float, pip: float = 0.01) -> float:
     """決まった数量になるリスクの割合（損切りに掛かったとき、資金の何割を失うか）。"""
     return units * stop_pips * pip / equity if equity > 0 else 0.0
@@ -285,30 +298,53 @@ def main() -> int:
                                # AI が見たもの。根拠と照らし合わせて、改善の種にする（scripts/fx_paper_review.py）
                                "context": context}))
         elif name == "rule_hourly_breakout":
-            want = hourly_breakout_target(hourly(bars[BASE], now))
+            h = hourly(bars[BASE], now)
+            want = hourly_breakout_target(h)
             held = 0 if account.position is None else (1 if account.position.units > 0 else -1)
+            previous = h.iloc[-21:-1] if len(h) > 20 else h.iloc[0:0]
+            logic = {"rule": RULES["rule_hourly_breakout"], "version": RULES_VERSION,
+                     "last_close": round(float(h["close"].iloc[-1]), 3) if len(h) else None,
+                     "high_20h": round(float(previous["high"].max()), 3) if len(previous) else None,
+                     "low_20h": round(float(previous["low"].min()), 3) if len(previous) else None,
+                     "target": want, "held": held}
             if want != 0 and want != held:
                 if held:
-                    decisions.append(({"action": "close"}, "1時間足の反対の突破", {}))
+                    decisions.append(({"action": "close"}, "1時間足の反対の突破", {"logic": logic}))
                 decisions.append(({"action": "open_long" if want > 0 else "open_short", "symbol": BASE,
                                    "risk_fraction": frame.risk.risk_per_trade, "stop_pips": 50, "take_pips": 0},
-                                  "1時間足の突破", {}))
+                                  "1時間足の突破", {"logic": logic}))
+            else:
+                decisions.append(({"action": "hold"}, "", {"logic": logic}))
         elif name in CARRY_ACCOUNTS:
             sym = CARRY_ACCOUNTS[name]
             base, quote = sym.split("_")
             carry = short[base] - short[quote] - SWAP_MARKUP if base in short and quote in short else None
-            want = carry_trend_target(daily_closes(api, sym, now), carry)
+            closes = daily_closes(api, sym, now)
+            want = carry_trend_target(closes, carry)
+            logic = {"rule": RULES["carry_trend"], "version": RULES_VERSION, "symbol": sym,
+                     "carry_percent": round(carry, 3) if carry is not None else None,
+                     "last_close": round(closes[-1], 3) if closes else None,
+                     "average_50d": round(sum(closes[-50:]) / 50, 3) if len(closes) >= 50 else None,
+                     "target": want, "held": int(account.position is not None)}
             if want == 1 and account.position is None:
                 decisions.append(({"action": "open_long", "symbol": sym,
                                    "risk_fraction": risk_for_units(FIXED_UNITS, CARRY_STOP, account.cash),
                                    "stop_pips": CARRY_STOP, "take_pips": 0},
-                                  f"金利差 {carry:+.2f}% と上向きの流れ", {"carry": carry}))
+                                  f"金利差 {carry:+.2f}% と上向きの流れ", {"logic": logic}))
             elif want == 0 and account.position is not None:
-                decisions.append(({"action": "close"}, "金利差か流れの条件が崩れた", {"carry": carry}))
-        elif name == "buy_and_hold" and account.position is None:
-            decisions.append(({"action": "open_long", "symbol": BASE,
-                               "risk_fraction": risk_for_units(FIXED_UNITS, HOLD_STOP, account.cash),
-                               "stop_pips": HOLD_STOP, "take_pips": 0}, "買って持つ", {}))
+                decisions.append(({"action": "close"}, "金利差か流れの条件が崩れた", {"logic": logic}))
+            else:
+                decisions.append(({"action": "hold"}, "", {"logic": logic}))
+        elif name == "buy_and_hold":
+            logic = {"rule": RULES["buy_and_hold"], "version": RULES_VERSION, "held": int(account.position is not None)}
+            if account.position is None:
+                decisions.append(({"action": "open_long", "symbol": BASE,
+                                   "risk_fraction": risk_for_units(FIXED_UNITS, HOLD_STOP, account.cash),
+                                   "stop_pips": HOLD_STOP, "take_pips": 0}, "買って持つ", {"logic": logic}))
+            else:
+                decisions.append(({"action": "hold"}, "", {"logic": logic}))
+        elif name == "no_trade":
+            decisions.append(({"action": "hold"}, "", {"logic": {"rule": RULES["no_trade"], "version": RULES_VERSION}}))
 
         for decision, reason, extra in decisions:
             equity = mark(account, quotes[account.position.symbol]["bid"], quotes[account.position.symbol]["ask"]) \

@@ -460,7 +460,8 @@ if page == "FX ペーパー":
             if e.get("kind") == "decision" else (f"{e['pnl']:+,.0f}円 " if "pnl" in e else "") + str(e.get("reason", "")),
             "AI": e.get("model", ""),
             "確信度": (e.get("decision") or {}).get("confidence", ""),
-            "根拠": (e.get("decision") or {}).get("reasoning", ""),
+            "根拠": (e.get("decision") or {}).get("reasoning", "")
+            or ", ".join(f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")),
         } for e in reversed(recent)]), hide_index=True, width="stretch")
         st.caption("判断のあとの値動きと根拠の照らし合わせは scripts/fx_paper_review.py。値動きは結果論なので、傾向を見る")
 
