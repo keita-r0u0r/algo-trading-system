@@ -51,7 +51,6 @@ def test_nothing_is_ordered_unless_enabled():
 
 @pytest.mark.parametrize("kw, words", [
     ({"killed": True}, "キルスイッチ"),
-    ({"equity": 9_400.0, "day_start_equity": 10_000.0}, "今日の損失"),
     ({"available": 500.0}, "取引余力"),
 ])
 def test_safety_stops_new_positions(kw, words):
@@ -167,3 +166,21 @@ def test_failsafe_closes_and_kills_when_stop_cannot_be_placed(tmp_path, monkeypa
     assert calls == ["open", "protect", "protect", "protect", "close"]
     assert (tmp_path / "KILL_fx_live").exists()
     assert [e["kind"] for e in events][-2:] == ["live_close", "live_error"]
+
+
+def test_daily_loss_does_not_stop_by_default_but_can_be_turned_on():
+    """利用者の方針: 致命的でない損失では止めない。"""
+    [action] = run_plan([OPEN_AI], equity=9_000.0, day_start_equity=10_000.0)
+    assert isinstance(action, Open)
+    [action] = run_plan([OPEN_AI], config=LiveConfig(enabled=True, daily_loss_limit=0.05),
+                        equity=9_000.0, day_start_equity=10_000.0)
+    assert isinstance(action, Skip) and "今日の損失" in action.reason
+
+
+def test_fatal_only_when_positions_and_margin_ratio_low():
+    from jqbt.application.fx_live_trade import is_fatal
+
+    assert is_fatal({"equity": "10000", "marginRatio": "100"}, has_positions=False, config=ON) == ""
+    assert is_fatal({"equity": "10000", "marginRatio": "790"}, has_positions=True, config=ON) == ""
+    assert "証拠金維持率" in is_fatal({"equity": "1500", "marginRatio": "120"}, has_positions=True, config=ON)
+    assert "0以下" in is_fatal({"equity": "-50", "marginRatio": "0"}, has_positions=True, config=ON)

@@ -25,6 +25,7 @@ from jqbt.application.fx_live_trade import (  # noqa: E402
     Open,
     Skip,
     book_from_events,
+    is_fatal,
     gone_positions,
     plan,
     stop_take_prices,
@@ -144,11 +145,23 @@ def run(paper_events: list[dict], quiet: bool = False) -> dict:
             events.append({"kind": "live_gone", "at": now, "account": p.account, "position_id": p.position_id,
                            "note": "GMOコイン側で決済された（損切り・利確・ロスカット）"})
             del book[p.account]
+        assets = trader.assets()
+        assets = assets[0] if isinstance(assets, list) and assets else assets
+        # 致命的な損失（不足金）のおそれ: 全部決済してキルスイッチ（決済はキルスイッチが入っていても出す）
+        fatal = is_fatal(assets, bool(open_ids), config)
+        if fatal:
+            kill(f"致命的な損失のおそれ: {fatal}")
+            events.append({"kind": "live_fatal", "at": now, "reason": fatal})
+            for position in trader.open_positions():
+                trader.market_close(position["symbol"], position["side"], int(position["positionId"]),
+                                    int(float(position["size"])), f"x{position['positionId']}"[:36])
+                events.append({"kind": "live_close", "at": now, "symbol": position["symbol"],
+                               "position_id": int(position["positionId"]), "reason": f"致命的な損失を防ぐ: {fatal}"})
+            fx_live_log.append(events)
+            return {"orders": len(events) - 1}
         if not relevant:
             fx_live_log.append(events)
             return {"orders": 0}
-        assets = trader.assets()
-        assets = assets[0] if isinstance(assets, list) and assets else assets
         prices = {t["symbol"]: float(t["ask"]) for t in trader.ticker()}
         snapshots = [e for e in log if e.get("kind") == "snapshot"]
         actions = plan(relevant, book, config, killed=KILL.exists(), equity=float(assets.get("equity") or 0),

@@ -10,12 +10,22 @@
   * 損切り・利確は、建てた直後に GMOコイン側に置く（システムが止まっても効く）。
     ペーパー運用の損切り・利確に掛かったときは、実際の口座でも GMOコイン側の注文で決済される
 
+## 方針（利用者が決めた）
+
+**止めるのは、致命的な損失（入金額を超える損＝不足金）のおそれがあるときだけ。** それ以外では止めない。
+持ち続ける理由が無くなった建玉は閉じる（ルールの条件が崩れた、AI が閉じると判断した、損切りの値段に届いた）。
+
 ## 安全装置（どれか1つでも当てはまれば、新しく建てない。決済はいつでも通す）
 
   * 有効にしていない（``enabled``）、キルスイッチが入っている
-  * 1口座の数量は ``max_units`` まで。まねる口座で、すでに建玉を持っている
-  * その日の初めから、評価額が ``daily_loss_limit`` 以上減った
+  * 1口座の数量は ``max_units`` まで。まねる口座で、すでに建玉を持っている（損の大きさを入金額より十分小さく保つ）
   * 取引余力が、必要な証拠金の ``margin_buffer`` 倍に足りない
+  * ``daily_loss_limit`` を決めたときだけ、その日の初めから評価額がその割合だけ減ったら建てない（既定は使わない）
+
+## 致命的な損失を防ぐ（``is_fatal``）
+
+証拠金維持率が ``fatal_margin_ratio``（%）を下回ったら、全部の建玉を成行で決済し、キルスイッチを入れる。
+GMOコインのロスカットは100%だが、急変ではロスカットの値段を飛び越えて入金額を超える損が出うるので、その手前で降りる。
 """
 
 from __future__ import annotations
@@ -32,8 +42,11 @@ class LiveConfig:
     accounts: tuple[str, ...] = ("ai", "carry_trend_USD_JPY")
     #: 1口座あたりの数量の上限（通貨）。ペーパー運用がこれより大きく建てても、ここで切る
     max_units: int = 100
-    #: その日の初めから評価額がこの割合だけ減ったら、その日は新しく建てない
-    daily_loss_limit: float = 0.05
+    #: その日の初めから評価額がこの割合だけ減ったら、その日は新しく建てない。None なら使わない（既定。
+    #: 利用者の方針: 致命的でない損失では止めない）
+    daily_loss_limit: float | None = None
+    #: 証拠金維持率（%）がこれを下回ったら、全部決済してキルスイッチ（致命的な損失＝不足金を防ぐ）
+    fatal_margin_ratio: float = 150.0
     #: 取引余力が、必要な証拠金（新規は20倍）のこの倍数に足りなければ建てない
     margin_buffer: float = 1.5
     leverage_for_entry: float = 20.0
@@ -153,7 +166,7 @@ def _blocked(account, e, book, config, killed, equity, day_start_equity, availab
         return "キルスイッチが入っている"
     if account in book:
         return "この口座は、実際の建玉をもう持っている"
-    if day_start_equity and equity <= day_start_equity * (1 - config.daily_loss_limit):
+    if config.daily_loss_limit and day_start_equity and equity <= day_start_equity * (1 - config.daily_loss_limit):
         return f"今日の損失が上限（{config.daily_loss_limit:.0%}）に届いた"
     size = min(int(abs(float(e["units"]))), config.max_units)
     price = prices.get(e["symbol"]) or float(e["price"])
@@ -182,3 +195,16 @@ def today_start_equity(snapshots: list[dict[str, Any]], today: dt.date) -> float
             if isinstance(assets, dict) and assets.get("equity") is not None:
                 return float(assets["equity"])
     return None
+
+
+def is_fatal(assets: dict[str, Any], has_positions: bool, config: LiveConfig) -> str:
+    """致命的な損失（不足金）のおそれ。理由を返す（無ければ空）。建玉が無いときは問わない。"""
+    if not has_positions:
+        return ""
+    equity = float(assets.get("equity") or 0)
+    if equity <= 0:
+        return f"評価額が0以下（{equity:,.0f}円）"
+    ratio = assets.get("marginRatio")
+    if ratio not in (None, "") and float(ratio) < config.fatal_margin_ratio:
+        return f"証拠金維持率が {float(ratio):.0f}%（{config.fatal_margin_ratio:.0f}% 未満）"
+    return ""
