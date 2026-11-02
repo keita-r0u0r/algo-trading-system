@@ -1,14 +1,12 @@
 """FX の自動売買（実際のお金）の計画と安全装置。I/O なし。
 
-ペーパー運用の口座の判断を、実際の口座で **小さく** まねる。何を発注するかをここで決め、
+判断する者（AI・金利差＋流れ など）は、**実際の口座の状態** を見て判断する。ペーパー運用（シミュレーション）とは独立で、
+ペーパー運用を止めても実際の売買は続く。ここでは判断（``Intent``）から何を発注するかを決め、
 発注そのものは ``scripts/fx_live_trade.py`` が ``GmoFxTrader`` で行う。
 
-## まねるもの
-
-  * この回のペーパー運用で、まねる口座が建てた（open）→ 実際にも成行で建てる
-  * この回のペーパー運用で、まねる口座が判断で閉じた（close）→ 実際の建玉も成行で決済する
-  * 損切り・利確は、建てた直後に GMOコイン側に置く（システムが止まっても効く）。
-    ペーパー運用の損切り・利確に掛かったときは、実際の口座でも GMOコイン側の注文で決済される
+  * 新規（open）→ 成行で建て、すぐに GMOコイン側に損切り（と利確）を置く（システムが止まっても効く）
+  * 判断で閉じる（close）→ 置いてある損切りを取り消し、成行で決済する
+  * 損切り・利確に掛かったら、GMOコイン側の注文で決済される（次の回で、無くなった建玉として記録する）
 
 ## 方針（利用者が決めた）
 
@@ -88,6 +86,24 @@ class LivePosition:
     size: int
     position_id: int
     protect_root_ids: list[int] = field(default_factory=list)
+    price: float | None = None
+    stop: float | None = None
+    take: float | None = None
+    opened_at: str = ""
+
+
+@dataclass(frozen=True)
+class Intent:
+    """判断する者が、実際の口座で何をしたいか（枠は通したあと）。"""
+
+    account: str
+    action: str  # open / close
+    at: str
+    symbol: str = ""
+    units: float = 0.0  # 符号つき（正は買い）
+    stop_pips: float | None = None
+    take_pips: float | None = None
+    reason: str = ""
 
 
 def client_id(account: str, at: str, kind: str) -> str:
@@ -104,9 +120,13 @@ def book_from_events(events: list[dict[str, Any]]) -> dict[str, LivePosition]:
         kind = e.get("kind")
         if kind == "live_open" and e.get("position_id"):
             book[e["account"]] = LivePosition(e["account"], e["symbol"], e["side"], int(e["size"]),
-                                              int(e["position_id"]), list(e.get("protect_root_ids") or []))
+                                              int(e["position_id"]), list(e.get("protect_root_ids") or []),
+                                              price=e.get("price"), opened_at=e.get("at", ""))
         elif kind == "live_protect" and e.get("account") in book:
-            book[e["account"]].protect_root_ids.append(int(e["root_order_id"]))
+            position = book[e["account"]]
+            if e.get("root_order_id") is not None:
+                position.protect_root_ids.append(int(e["root_order_id"]))
+            position.stop, position.take = e.get("stop"), e.get("take")
         elif kind in ("live_close", "live_gone") and e.get("account") in book:
             if book[e["account"]].position_id == int(e.get("position_id", -1)):
                 del book[e["account"]]
@@ -119,7 +139,7 @@ def gone_positions(book: dict[str, LivePosition], open_position_ids: set[int]) -
 
 
 def plan(
-    paper_events: list[dict[str, Any]],
+    intents: list[Intent],
     book: dict[str, LivePosition],
     config: LiveConfig,
     *,
@@ -129,37 +149,35 @@ def plan(
     available: float,
     prices: dict[str, float],
 ) -> list[Open | Close | Skip]:
-    """この回のペーパー運用の出来事から、実際の口座で何をするかを決める。"""
+    """判断（枠を通したもの）から、実際の口座で何をするかを決める。決済はいつでも通す。"""
     actions: list[Open | Close | Skip] = []
-    for e in paper_events:
-        account = e.get("account")
+    for intent in intents:
+        account = intent.account
         if account not in config.accounts:
             continue
-        if e.get("kind") == "close" and account in book and "損切り" not in str(e.get("reason")) \
-                and "利確" not in str(e.get("reason")):
-            # 判断で閉じた（損切り・利確は GMOコイン側の注文で決済されるので、ここでは出さない）
-            p = book[account]
-            actions.append(Close(account, p.symbol, p.side, p.position_id, p.size, tuple(p.protect_root_ids),
-                                 client_id(account, e.get("at", ""), "c")))
-        elif e.get("kind") == "open":
-            reason = _blocked(account, e, book, config, killed, equity, day_start_equity, available, prices)
-            if reason:
-                actions.append(Skip(account, reason))
-                continue
-            side = "BUY" if float(e["units"]) > 0 else "SELL"
-            price = float(e["price"])
-            stop_pips = abs(price - float(e["stop"])) / 0.01 if e.get("stop") is not None else None
-            take_pips = abs(float(e["take"]) - price) / 0.01 if e.get("take") is not None else None
-            if not stop_pips:
-                actions.append(Skip(account, "損切りの無い判断は、実際の口座ではまねない"))
-                continue
-            size = min(int(abs(float(e["units"]))), config.max_units)
-            actions.append(Open(account, e["symbol"], side, size, round(stop_pips, 1),
-                                round(take_pips, 1) if take_pips else None, client_id(account, e.get("at", ""), "o")))
+        if intent.action == "close":
+            if account in book:
+                p = book[account]
+                actions.append(Close(account, p.symbol, p.side, p.position_id, p.size, tuple(p.protect_root_ids),
+                                     client_id(account, intent.at, "c")))
+            continue
+        if intent.action != "open":
+            continue
+        size = min(int(abs(intent.units)), config.max_units)
+        reason = _blocked(account, intent.symbol, size, book, config, killed, equity, day_start_equity, available, prices)
+        if not reason and not intent.stop_pips:
+            reason = "損切りの無い判断は、実際の口座では建てない"
+        if reason:
+            actions.append(Skip(account, reason))
+            continue
+        actions.append(Open(account, intent.symbol, "BUY" if intent.units > 0 else "SELL", size,
+                            round(float(intent.stop_pips), 1),
+                            round(float(intent.take_pips), 1) if intent.take_pips else None,
+                            client_id(account, intent.at, "o")))
     return actions
 
 
-def _blocked(account, e, book, config, killed, equity, day_start_equity, available, prices) -> str:
+def _blocked(account, symbol, size, book, config, killed, equity, day_start_equity, available, prices) -> str:
     if not config.enabled:
         return "自動売買が有効になっていない（fx_live_enabled）"
     if killed:
@@ -168,8 +186,7 @@ def _blocked(account, e, book, config, killed, equity, day_start_equity, availab
         return "この口座は、実際の建玉をもう持っている"
     if config.daily_loss_limit and day_start_equity and equity <= day_start_equity * (1 - config.daily_loss_limit):
         return f"今日の損失が上限（{config.daily_loss_limit:.0%}）に届いた"
-    size = min(int(abs(float(e["units"]))), config.max_units)
-    price = prices.get(e["symbol"]) or float(e["price"])
+    price = prices.get(symbol) or 0.0
     needed = size * price / config.leverage_for_entry * config.margin_buffer
     if available < needed:
         return f"取引余力が足りない（{available:,.0f}円 < {needed:,.0f}円）"
