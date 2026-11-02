@@ -11,6 +11,7 @@ import pytest
 
 from jqbt.application.fx_live_trade import (
     Close,
+    Intent,
     LiveConfig,
     LivePosition,
     Open,
@@ -25,8 +26,8 @@ from jqbt.infrastructure.gmo_fx import GmoError, sign
 from jqbt.infrastructure.gmo_fx_trader import GmoFxTrader
 
 ON = LiveConfig(enabled=True)
-OPEN_AI = {"kind": "open", "account": "ai", "symbol": "USD_JPY", "units": 250, "price": 158.0,
-           "stop": 157.75, "take": 158.5, "at": "2026-11-02T10:15:00+09:00"}
+OPEN_AI = Intent(account="ai", action="open", at="2026-11-02T10:15:00+09:00", symbol="USD_JPY", units=250,
+                 stop_pips=25.0, take_pips=50.0)
 
 
 def run_plan(events, book=None, config=ON, **kw):
@@ -64,34 +65,37 @@ def test_one_position_per_account():
     assert isinstance(action, Skip) and "持っている" in action.reason
 
 
-def test_accounts_not_mirrored_are_ignored():
-    event = dict(OPEN_AI, account="rule_hourly_breakout")
-    assert run_plan([event]) == []
+def test_accounts_not_traded_live_are_ignored():
+    from dataclasses import replace
+
+    assert run_plan([replace(OPEN_AI, account="rule_hourly_breakout")]) == []
 
 
-def test_decision_close_closes_live_position_but_stop_hits_are_left_to_gmo():
+def test_close_intent_closes_live_position_with_its_protect_orders():
     book = {"ai": LivePosition("ai", "USD_JPY", "BUY", 100, 77, [5])}
-    [close] = run_plan([{"kind": "close", "account": "ai", "reason": "AI: 閉じる", "at": "2026-11-02T11:00"}], book)
+    [close] = run_plan([Intent(account="ai", action="close", at="2026-11-02T11:00")], book)
     assert isinstance(close, Close) and close.position_id == 77 and close.protect_root_ids == (5,)
-    assert run_plan([{"kind": "close", "account": "ai", "reason": "損切り", "at": "x"}], book) == []
+    assert run_plan([Intent(account="ai", action="close", at="x")], {}) == []  # 持っていなければ何もしない
 
 
 def test_closing_is_allowed_even_when_killed():
     book = {"ai": LivePosition("ai", "USD_JPY", "BUY", 100, 77)}
-    [close] = run_plan([{"kind": "close", "account": "ai", "reason": "判断", "at": "x"}], book, killed=True)
+    [close] = run_plan([Intent(account="ai", action="close", at="x")], book, killed=True)
     assert isinstance(close, Close)
 
 
 def test_book_and_gone_positions():
     events = [
-        {"kind": "live_open", "account": "ai", "symbol": "USD_JPY", "side": "BUY", "size": 100, "position_id": 1},
-        {"kind": "live_protect", "account": "ai", "position_id": 1, "root_order_id": 9},
+        {"kind": "live_open", "account": "ai", "symbol": "USD_JPY", "side": "BUY", "size": 100, "position_id": 1,
+         "price": 158.0, "at": "2026-11-02T10:15:00+09:00"},
+        {"kind": "live_protect", "account": "ai", "position_id": 1, "root_order_id": 9, "stop": 157.75, "take": 158.5},
         {"kind": "live_open", "account": "carry_trend_USD_JPY", "symbol": "USD_JPY", "side": "BUY", "size": 100,
          "position_id": 2},
         {"kind": "live_close", "account": "carry_trend_USD_JPY", "position_id": 2},
     ]
     book = book_from_events(events)
     assert list(book) == ["ai"] and book["ai"].protect_root_ids == [9]
+    assert (book["ai"].price, book["ai"].stop, book["ai"].take) == (158.0, 157.75, 158.5)
     assert [p.position_id for p in gone_positions(book, open_position_ids=set())] == [1]
 
 

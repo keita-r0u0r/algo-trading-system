@@ -1,6 +1,6 @@
-"""FX の自動売買（**実際のお金**）。ペーパー運用の口座の判断を、実際の口座で小さくまねる。
+"""FX の自動売買（**実際のお金**）。判断する者（AI・金利差＋流れ）が、実際の口座の状態を見て判断し、ここで発注する。
 
-ペーパー運用（scripts/fx_paper.py）の1回ごとに呼ばれる。単独では動かさない。
+ペーパー運用（シミュレーション）とは独立。15分ごとの回（scripts/fx_paper.py）の中で、ペーパー運用を止めていても動く。
 
   * ``FX_LIVE_ENABLED=true`` のときだけ注文を出す（infra の ``fx_live_enabled``）。それ以外は、何をしたかを記録するだけ
   * キルスイッチ ``state/KILL_fx_live`` が在れば、新しく建てない（画面の「実際の約定」から入れられる）
@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from jqbt.application.fx_live_trade import (  # noqa: E402
     Close,
+    Intent,
     LiveConfig,
     Open,
     Skip,
@@ -120,63 +121,86 @@ def execute(trader: GmoFxTrader, action, now: str) -> list[dict]:
     return events
 
 
-def run(paper_events: list[dict], quiet: bool = False) -> dict:
-    """この回のペーパー運用の出来事を受け取り、実際の口座で必要な注文を出す。"""
-    config = config_from_env()
-    now = dt.datetime.now(JST).isoformat(timespec="seconds")
-    relevant = [e for e in paper_events if e.get("account") in config.accounts and e.get("kind") in ("open", "close")]
-    trader = trader_from_secrets()
-    if trader is None:
-        if relevant and config.enabled:
-            fx_live_log.append([{"kind": "live_error", "at": now, "error": "発注用のキーが無い"}])
-        return {"orders": 0, "note": "発注用のキーが無い"}
+class LiveSession:
+    """1回分の実際の口座。判断する者が見る状態（建玉・評価額）を用意し、判断を発注にする。
 
-    log = fx_live_log.load()
-    book = book_from_events(log)
-    events: list[dict] = []
-    try:
-        open_ids = {int(p["positionId"]) for p in trader.open_positions()}
-        # 発注用のキーが使えるか（IP の制限を通るか）。状態が変わったときだけ記録する
-        last_ready = next((e for e in reversed(log) if e.get("kind") == "live_ready"), None)
-        if not last_ready or not last_ready.get("ok"):
-            events.append({"kind": "live_ready", "at": now, "ok": True, "enabled": config.enabled,
-                           "note": "発注用のキーで照会できた（IP の制限を通った）"})
-        for p in gone_positions(book, open_ids):
-            events.append({"kind": "live_gone", "at": now, "account": p.account, "position_id": p.position_id,
-                           "note": "GMOコイン側で決済された（損切り・利確・ロスカット）"})
-            del book[p.account]
-        assets = trader.assets()
-        assets = assets[0] if isinstance(assets, list) and assets else assets
-        # 致命的な損失（不足金）のおそれ: 全部決済してキルスイッチ（決済はキルスイッチが入っていても出す）
-        fatal = is_fatal(assets, bool(open_ids), config)
-        if fatal:
-            kill(f"致命的な損失のおそれ: {fatal}")
-            events.append({"kind": "live_fatal", "at": now, "reason": fatal})
-            for position in trader.open_positions():
-                trader.market_close(position["symbol"], position["side"], int(position["positionId"]),
-                                    int(float(position["size"])), f"x{position['positionId']}"[:36])
-                events.append({"kind": "live_close", "at": now, "symbol": position["symbol"],
-                               "position_id": int(position["positionId"]), "reason": f"致命的な損失を防ぐ: {fatal}"})
-            fx_live_log.append(events)
-            return {"orders": len(events) - 1}
-        if not relevant:
-            fx_live_log.append(events)
-            return {"orders": 0}
-        prices = {t["symbol"]: float(t["ask"]) for t in trader.ticker()}
-        snapshots = [e for e in log if e.get("kind") == "snapshot"]
-        actions = plan(relevant, book, config, killed=KILL.exists(), equity=float(assets.get("equity") or 0),
+    ペーパー運用とは独立。ペーパー運用を止めていても動く。
+    """
+
+    def __init__(self, trader: GmoFxTrader, config: LiveConfig, log: list[dict], now: str) -> None:
+        self.trader, self.config, self.log, self.now = trader, config, log, now
+        self.book = book_from_events(log)
+        self.events: list[dict] = []
+        self.assets: dict = {}
+        self.prices: dict[str, float] = {}
+
+    @classmethod
+    def open(cls) -> "LiveSession | None":
+        """口座を読み、無くなった建玉を記録し、致命的な損失のおそれがあれば全部決済する。使えなければ None。"""
+        config = config_from_env()
+        now = dt.datetime.now(JST).isoformat(timespec="seconds")
+        trader = trader_from_secrets()
+        if trader is None:
+            return None
+        session = cls(trader, config, fx_live_log.load(), now)
+        try:
+            positions = trader.open_positions()
+            open_ids = {int(p["positionId"]) for p in positions}
+            last_ready = next((e for e in reversed(session.log) if e.get("kind") == "live_ready"), None)
+            if not last_ready or not last_ready.get("ok"):
+                session.events.append({"kind": "live_ready", "at": now, "ok": True, "enabled": config.enabled,
+                                       "note": "発注用のキーで照会できた（IP の制限を通った）"})
+            for p in gone_positions(session.book, open_ids):
+                session.events.append({"kind": "live_gone", "at": now, "account": p.account,
+                                       "position_id": p.position_id,
+                                       "note": "GMOコイン側で決済された（損切り・利確・ロスカット）"})
+                del session.book[p.account]
+            assets = trader.assets()
+            session.assets = assets[0] if isinstance(assets, list) and assets else (assets or {})
+            session.prices = {t["symbol"]: float(t["ask"]) for t in trader.ticker()}
+            fatal = is_fatal(session.assets, bool(open_ids), config)
+            if fatal:
+                kill(f"致命的な損失のおそれ: {fatal}")
+                session.events.append({"kind": "live_fatal", "at": now, "reason": fatal})
+                for position in positions:
+                    trader.market_close(position["symbol"], position["side"], int(position["positionId"]),
+                                        int(float(position["size"])), f"x{position['positionId']}"[:36])
+                    session.events.append({"kind": "live_close", "at": now, "symbol": position["symbol"],
+                                           "position_id": int(position["positionId"]),
+                                           "reason": f"致命的な損失を防ぐ: {fatal}"})
+                session.finish()
+                return None
+        except GmoError as exc:
+            session.events.append({"kind": "live_error", "at": now, "error": str(exc)[:300]})
+            last_ready = next((e for e in reversed(session.log) if e.get("kind") == "live_ready"), None)
+            if not last_ready or last_ready.get("ok"):
+                session.events.append({"kind": "live_ready", "at": now, "ok": False, "note": str(exc)[:200]})
+            session.finish()
+            return None
+        return session
+
+    @property
+    def equity(self) -> float:
+        return float(self.assets.get("equity") or 0)
+
+    def position_of(self, account: str):
+        return self.book.get(account)
+
+    def execute(self, intents: list[Intent]) -> None:
+        snapshots = [e for e in self.log if e.get("kind") == "snapshot"]
+        actions = plan(intents, self.book, self.config, killed=KILL.exists(), equity=self.equity,
                        day_start_equity=today_start_equity(snapshots, dt.date.today()),
-                       available=float(assets.get("availableAmount") or 0), prices=prices)
+                       available=float(self.assets.get("availableAmount") or 0), prices=self.prices)
         for action in actions:
-            events += execute(trader, action, now)
-    except GmoError as exc:
-        events.append({"kind": "live_error", "at": now, "error": str(exc)[:300]})
-        last_ready = next((e for e in reversed(log) if e.get("kind") == "live_ready"), None)
-        if not last_ready or last_ready.get("ok"):
-            events.append({"kind": "live_ready", "at": now, "ok": False, "note": str(exc)[:200]})
-    fx_live_log.append(events)
-    orders = sum(e["kind"] in ("live_open", "live_close") for e in events)
-    if not quiet and events:
-        for e in events:
-            print(f"  [実際] {e['kind']} {e.get('account', '')} {e.get('symbol', '')} {e.get('reason', '') or e.get('error', '')}")
-    return {"orders": orders}
+            try:
+                self.events += execute(self.trader, action, self.now)
+            except GmoError as exc:
+                self.events.append({"kind": "live_error", "at": self.now, "account": getattr(action, "account", ""),
+                                    "error": str(exc)[:300]})
+
+    def finish(self, quiet: bool = False) -> None:
+        fx_live_log.append(self.events)
+        if not quiet:
+            for e in self.events:
+                print(f"  [実際] {e['kind']} {e.get('account', '')} {e.get('symbol', '')} "
+                      f"{e.get('reason', '') or e.get('error', '') or e.get('note', '')}")

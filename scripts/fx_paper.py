@@ -27,16 +27,18 @@ import argparse
 import datetime as dt
 import os
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import httpx  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from jqbt.application.fx_paper import (  # noqa: E402
     PaperAccount,
+    PaperPosition,
     advance,
     carry_trend_target,
     execute,
@@ -134,7 +136,12 @@ def recent_bars(api: GmoFxClient, symbol: str, now: dt.datetime, days_back: int)
     day = now.date() - dt.timedelta(days=days_back)
     while day <= now.date():
         if day.weekday() < 5:
-            raw = fetch_day(api, symbol, day)
+            try:
+                raw = fetch_day(api, symbol, day)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                raw = pd.DataFrame()  # その日の営業日がまだ始まっていない（深夜0時〜朝）
             if not raw.empty:
                 raw["session"] = day
                 frames.append(raw)
@@ -224,6 +231,114 @@ def build_ai():
     return build_assistant()
 
 
+@dataclass
+class Context:
+    """1回分の相場の材料。ペーパーの口座と実際の口座が、同じ材料で判断する。"""
+
+    api: GmoFxClient
+    now: dt.datetime
+    frame: TradingFrame
+    carry_frame: TradingFrame
+    insts: dict
+    quotes: dict
+    bars: dict
+    ai: object
+    today_rates: dict
+    short: dict
+    #: 同じ状態（建玉なし・同じ向き）なら、AI の判断を使い回す（ペーパーと実際で2回呼ばない）
+    ai_cache: dict = field(default_factory=dict)
+    closes: dict = field(default_factory=dict)
+
+
+def frame_for(name: str, ctx: Context) -> TradingFrame:
+    return ctx.carry_frame if name in CARRY_ACCOUNTS or name == "buy_and_hold" else ctx.frame
+
+
+def position_signature(account: PaperAccount) -> tuple:
+    p = account.position
+    return () if p is None else (p.symbol, 1 if p.units > 0 else -1)
+
+
+def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict]) -> list[tuple[dict, str, dict]]:
+    """判断する者 ``name`` が、口座 ``account``（ペーパーでも実際でも）の状態を見て判断する。
+
+    返すのは (判断, 理由, 記録に足すもの) の並び。枠（core.fx.frame）はまだ通していない。
+    """
+    now, quotes, bars, frame = ctx.now, ctx.quotes, ctx.bars, ctx.frame
+    decisions: list[tuple[dict, str, dict]] = []
+    if name == "ai":
+        if ctx.ai is None:
+            return []
+        key = position_signature(account)
+        if key in ctx.ai_cache:
+            data, extra = ctx.ai_cache[key]
+            return [(data, f"AI（同じ状態の判断を使い回し）: {data.get('reasoning', '')}", {**extra, "reused": True})]
+        context = ai_context(account, frame, quotes, bars, now, events, ctx.today_rates)
+        try:
+            reply = ctx.ai.fx_decide(context, now.date())
+        except Exception as exc:  # AI が使えなくても、他は進める
+            return [({"action": "hold"}, "", {"error": str(exc)[:300]})]
+        data = reply.data or {}
+        extra = {"model": reply.model, "call_id": reply.call_id, "confidence": data.get("confidence"),
+                 "prompt_version": getattr(ctx.ai, "fx_prompt_version", None),
+                 # AI が見たもの。根拠と照らし合わせて、改善の種にする（scripts/fx_paper_review.py）
+                 "context": context}
+        ctx.ai_cache[key] = (data, extra)
+        return [(data, f"AI {reply.model}: {data.get('reasoning', '')}", extra)]
+    if name == "rule_hourly_breakout":
+        h = hourly(bars[BASE], now)
+        want = hourly_breakout_target(h)
+        held = 0 if account.position is None else (1 if account.position.units > 0 else -1)
+        previous = h.iloc[-21:-1] if len(h) > 20 else h.iloc[0:0]
+        logic = {"rule": RULES["rule_hourly_breakout"], "version": RULES_VERSION,
+                 "last_close": round(float(h["close"].iloc[-1]), 3) if len(h) else None,
+                 "high_20h": round(float(previous["high"].max()), 3) if len(previous) else None,
+                 "low_20h": round(float(previous["low"].min()), 3) if len(previous) else None,
+                 "target": want, "held": held}
+        if want != 0 and want != held:
+            if held:
+                decisions.append(({"action": "close"}, "1時間足の反対の突破", {"logic": logic}))
+            decisions.append(({"action": "open_long" if want > 0 else "open_short", "symbol": BASE,
+                               "risk_fraction": frame.risk.risk_per_trade, "stop_pips": 50, "take_pips": 0},
+                              "1時間足の突破", {"logic": logic}))
+        else:
+            decisions.append(({"action": "hold"}, "", {"logic": logic}))
+        return decisions
+    if name in CARRY_ACCOUNTS:
+        sym = CARRY_ACCOUNTS[name]
+        base, quote = sym.split("_")
+        carry = ctx.short[base] - ctx.short[quote] - SWAP_MARKUP if base in ctx.short and quote in ctx.short else None
+        if sym not in ctx.closes:
+            ctx.closes[sym] = daily_closes(ctx.api, sym, now)
+        closes = ctx.closes[sym]
+        want = carry_trend_target(closes, carry)
+        logic = {"rule": RULES["carry_trend"], "version": RULES_VERSION, "symbol": sym,
+                 "carry_percent": round(carry, 3) if carry is not None else None,
+                 "last_close": round(closes[-1], 3) if closes else None,
+                 "average_50d": round(sum(closes[-50:]) / 50, 3) if len(closes) >= 50 else None,
+                 "target": want, "held": int(account.position is not None)}
+        if want == 1 and account.position is None:
+            decisions.append(({"action": "open_long", "symbol": sym,
+                               "risk_fraction": risk_for_units(FIXED_UNITS, CARRY_STOP, account.cash),
+                               "stop_pips": CARRY_STOP, "take_pips": 0},
+                              f"金利差 {carry:+.2f}% と上向きの流れ", {"logic": logic}))
+        elif want == 0 and account.position is not None:
+            decisions.append(({"action": "close"}, "金利差か流れの条件が崩れた", {"logic": logic}))
+        else:
+            decisions.append(({"action": "hold"}, "", {"logic": logic}))
+        return decisions
+    if name == "buy_and_hold":
+        logic = {"rule": RULES["buy_and_hold"], "version": RULES_VERSION, "held": int(account.position is not None)}
+        if account.position is None:
+            return [({"action": "open_long", "symbol": BASE,
+                      "risk_fraction": risk_for_units(FIXED_UNITS, HOLD_STOP, account.cash),
+                      "stop_pips": HOLD_STOP, "take_pips": 0}, "買って持つ", {"logic": logic})]
+        return [({"action": "hold"}, "", {"logic": logic})]
+    if name == "no_trade":
+        return [({"action": "hold"}, "", {"logic": {"rule": RULES["no_trade"], "version": RULES_VERSION}})]
+    return []
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--status", action="store_true", help="口座の状態を見るだけ（進めない）")
@@ -241,22 +356,13 @@ def main() -> int:
                   f"{(acc.position.symbol + ' ' + f'{acc.position.units:+,.0f}') if acc.position else '—'}")
         return 0
 
-    if PAUSE.exists():
-        # 画面から止めている。判断も仮想の約定もしない（自動売買も新しく建てない）。実際の口座の照会だけ続ける
-        print(f"ペーパー運用は止めています（{PAUSE.read_text(encoding='utf-8').strip()}）")
-        try:
-            from fx_live_sync import sync
-
-            sync(quiet=True)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  実際の約定を読めませんでした: {type(exc).__name__}")
-        return 0
-
+    paused = PAUSE.exists()
     api = GmoFxClient()
     now = dt.datetime.now(JST).replace(second=0, microsecond=0)
     status = api.status()
     if status != "OPEN":
         print(f"市場の状態: {status}。今回は進めません")
+        sync_live()
         return 0
 
     frame = TradingFrame(symbols=SYMBOLS, risk=RISK_PROFILES[args.risk])
@@ -271,143 +377,70 @@ def main() -> int:
     # （週末や停止のあとに間が空いても、そのあいだの損切りを見逃さない。最大 MAX_GAP_DAYS 日）
     held_since: dict[str, dt.date] = {}
     for a in accounts.values():
-        if a.position is not None and a.last_time:
+        if a.position is not None and a.last_time and not paused:
             day = pd.Timestamp(a.last_time).date()
             held_since[a.position.symbol] = min(day, held_since.get(a.position.symbol, day))
     bars = {}
     for sym in insts:
         gap = (now.date() - held_since[sym]).days + 1 if sym in held_since else 0
         bars[sym] = recent_bars(api, sym, now, min(max(gap, 3), MAX_GAP_DAYS))
-    halted_all = KILL.exists()
 
-    new_events: list[dict] = []
     ai = build_ai()
-    today_rates = rates_summary(now.date()) if ai is not None else {}
-    short = short_rates(now.date())
-    for name, account in accounts.items():
-        account_frame = carry_frame if name in CARRY_ACCOUNTS or name == "buy_and_hold" else frame
-        symbol = account.position.symbol if account.position else BASE
-        swap_long, swap_short = swap_for(symbol, quotes[symbol]["bid"], short)
-        step = advance(account, bars[symbol], COSTS, insts[symbol], daily_loss_limit=account_frame.risk.daily_loss_limit,
-                       swap_long=swap_long, swap_short=swap_short)
-        account = step.account
-        new_events += step.events
-        if account.stopped:
-            accounts[name] = account
-            continue
+    ctx = Context(api=api, now=now, frame=frame, carry_frame=carry_frame, insts=insts, quotes=quotes, bars=bars,
+                  ai=ai, today_rates=rates_summary(now.date()) if ai is not None else {},
+                  short=short_rates(now.date()), ai_cache={})
 
-        decisions: list[tuple[dict, str, dict]] = []  # (判断, 理由, 記録に足すもの)
-        if name == "ai":
-            if ai is None:
-                accounts[name] = account
-                continue
-            context = ai_context(account, frame, quotes, bars, now, events + new_events, today_rates)
-            try:
-                reply = ai.fx_decide(context, now.date())
-            except Exception as exc:  # AI が使えなくても、他の口座は進める
-                new_events.append({"kind": "decision", "account": name, "at": now.isoformat(), "error": str(exc)[:300]})
-                accounts[name] = account
-                continue
-            data = reply.data or {}
-            decisions.append((data, f"AI {reply.model}: {data.get('reasoning', '')}",
-                              {"model": reply.model, "call_id": reply.call_id, "confidence": data.get("confidence"),
-                               "prompt_version": getattr(ai, "fx_prompt_version", None),
-                               # AI が見たもの。根拠と照らし合わせて、改善の種にする（scripts/fx_paper_review.py）
-                               "context": context}))
-        elif name == "rule_hourly_breakout":
-            h = hourly(bars[BASE], now)
-            want = hourly_breakout_target(h)
-            held = 0 if account.position is None else (1 if account.position.units > 0 else -1)
-            previous = h.iloc[-21:-1] if len(h) > 20 else h.iloc[0:0]
-            logic = {"rule": RULES["rule_hourly_breakout"], "version": RULES_VERSION,
-                     "last_close": round(float(h["close"].iloc[-1]), 3) if len(h) else None,
-                     "high_20h": round(float(previous["high"].max()), 3) if len(previous) else None,
-                     "low_20h": round(float(previous["low"].min()), 3) if len(previous) else None,
-                     "target": want, "held": held}
-            if want != 0 and want != held:
-                if held:
-                    decisions.append(({"action": "close"}, "1時間足の反対の突破", {"logic": logic}))
-                decisions.append(({"action": "open_long" if want > 0 else "open_short", "symbol": BASE,
-                                   "risk_fraction": frame.risk.risk_per_trade, "stop_pips": 50, "take_pips": 0},
-                                  "1時間足の突破", {"logic": logic}))
-            else:
-                decisions.append(({"action": "hold"}, "", {"logic": logic}))
-        elif name in CARRY_ACCOUNTS:
-            sym = CARRY_ACCOUNTS[name]
-            base, quote = sym.split("_")
-            carry = short[base] - short[quote] - SWAP_MARKUP if base in short and quote in short else None
-            closes = daily_closes(api, sym, now)
-            want = carry_trend_target(closes, carry)
-            logic = {"rule": RULES["carry_trend"], "version": RULES_VERSION, "symbol": sym,
-                     "carry_percent": round(carry, 3) if carry is not None else None,
-                     "last_close": round(closes[-1], 3) if closes else None,
-                     "average_50d": round(sum(closes[-50:]) / 50, 3) if len(closes) >= 50 else None,
-                     "target": want, "held": int(account.position is not None)}
-            if want == 1 and account.position is None:
-                decisions.append(({"action": "open_long", "symbol": sym,
-                                   "risk_fraction": risk_for_units(FIXED_UNITS, CARRY_STOP, account.cash),
-                                   "stop_pips": CARRY_STOP, "take_pips": 0},
-                                  f"金利差 {carry:+.2f}% と上向きの流れ", {"logic": logic}))
-            elif want == 0 and account.position is not None:
-                decisions.append(({"action": "close"}, "金利差か流れの条件が崩れた", {"logic": logic}))
-            else:
-                decisions.append(({"action": "hold"}, "", {"logic": logic}))
-        elif name == "buy_and_hold":
-            logic = {"rule": RULES["buy_and_hold"], "version": RULES_VERSION, "held": int(account.position is not None)}
-            if account.position is None:
-                decisions.append(({"action": "open_long", "symbol": BASE,
-                                   "risk_fraction": risk_for_units(FIXED_UNITS, HOLD_STOP, account.cash),
-                                   "stop_pips": HOLD_STOP, "take_pips": 0}, "買って持つ", {"logic": logic}))
-            else:
-                decisions.append(({"action": "hold"}, "", {"logic": logic}))
-        elif name == "no_trade":
-            decisions.append(({"action": "hold"}, "", {"logic": {"rule": RULES["no_trade"], "version": RULES_VERSION}}))
-
-        for decision, reason, extra in decisions:
-            equity = mark(account, quotes[account.position.symbol]["bid"], quotes[account.position.symbol]["ask"]) \
-                if account.position else account.cash
-            approved, rejected = check(
-                decision, account_frame, equity=equity, holding=account.position.symbol if account.position else None,
-                spread_pips={s: q["spread"] for s, q in quotes.items()}, prices={s: q["ask"] for s, q in quotes.items()},
-                instruments=insts, halted=halted_all or account.halted_session == account.session,
-            )
-            new_events.append({"kind": "decision", "account": name, "at": now.isoformat(), "decision": decision,
-                               "approved": approved is not None, "rejected": rejected, **extra})
-            if approved is None:
-                continue
-            q = quotes[approved.symbol]
-            step = execute(account, approved, bid=q["bid"], ask=q["ask"], at=now, costs=COSTS,
-                           inst=insts[approved.symbol], reason=reason)
+    # --- ペーパー運用（シミュレーション）。止めていれば何もしない。実際の売買には影響しない ---
+    new_events: list[dict] = []
+    if paused:
+        print(f"ペーパー運用は止めています（{PAUSE.read_text(encoding='utf-8').strip()}）。実際の売買は別に動きます")
+    else:
+        halted_all = KILL.exists()
+        for name, account in accounts.items():
+            account_frame = frame_for(name, ctx)
+            symbol = account.position.symbol if account.position else BASE
+            swap_long, swap_short = swap_for(symbol, quotes[symbol]["bid"], ctx.short)
+            step = advance(account, bars[symbol], COSTS, insts[symbol], daily_loss_limit=account_frame.risk.daily_loss_limit,
+                           swap_long=swap_long, swap_short=swap_short)
             account = step.account
             new_events += step.events
-        accounts[name] = account
+            if account.stopped:
+                accounts[name] = account
+                continue
+            for decision, reason, extra in decide(name, account, ctx, events + new_events):
+                equity = mark(account, quotes[account.position.symbol]["bid"], quotes[account.position.symbol]["ask"]) \
+                    if account.position else account.cash
+                approved, rejected = check(
+                    decision, account_frame, equity=equity, holding=account.position.symbol if account.position else None,
+                    spread_pips={s: q["spread"] for s, q in quotes.items()}, prices={s: q["ask"] for s, q in quotes.items()},
+                    instruments=insts, halted=halted_all or account.halted_session == account.session,
+                )
+                new_events.append({"kind": "decision", "account": name, "at": now.isoformat(), "decision": decision,
+                                   "approved": approved is not None, "rejected": rejected, **extra})
+                if approved is None:
+                    continue
+                q = quotes[approved.symbol]
+                step = execute(account, approved, bid=q["bid"], ask=q["ask"], at=now, costs=COSTS,
+                               inst=insts[approved.symbol], reason=reason)
+                account = step.account
+                new_events += step.events
+            accounts[name] = account
+        for name, account in accounts.items():
+            p = account.position
+            equity = mark(account, quotes[p.symbol]["bid"], quotes[p.symbol]["ask"]) if p else account.cash
+            accounts[name] = account = replace(account, equity=equity)
+            new_events.append({"kind": "snapshot", "account": name, "at": now.isoformat(), "state": account.to_dict()})
+        fx_paper_log.append(new_events)
 
-    for name, account in accounts.items():
-        p = account.position
-        equity = mark(account, quotes[p.symbol]["bid"], quotes[p.symbol]["ask"]) if p else account.cash
-        accounts[name] = account = replace(account, equity=equity)
-        new_events.append({"kind": "snapshot", "account": name, "at": now.isoformat(), "state": account.to_dict()})
-    fx_paper_log.append(new_events)
-
-    # 自動売買（実際のお金）。有効にしていなければ注文は出さない。失敗してもペーパー運用は止めない
+    # --- 実際の売買（実際のお金）。ペーパー運用とは独立に、実際の口座の状態を見て判断する ---
     try:
-        from fx_live_trade import run as live_trade
-
-        live_trade(new_events)
+        trade_live(ctx)
     except Exception as exc:  # noqa: BLE001
         print(f"  自動売買でエラー: {type(exc).__name__}: {str(exc)[:200]}")
 
-    # 実際の約定・建玉・資産も読んで記録する（読むだけ。失敗してもペーパー運用は止めない）
-    try:
-        from fx_live_sync import sync
+    sync_live()
 
-        live = sync(quiet=True)
-        if live["new"] or live["errors"]:
-            print(f"  実際の約定: 新しく {live['new']} 件" + (f"（読めなかったもの {len(live['errors'])} 件）" if live["errors"] else ""))
-    except Exception as exc:  # noqa: BLE001
-        print(f"  実際の約定を読めませんでした: {type(exc).__name__}")
-
-    print(f"{now:%Y-%m-%d %H:%M} 日本時間 / リスクの度合い {args.risk}（ペーパー運用。注文は出していません）")
+    print(f"{now:%Y-%m-%d %H:%M} 日本時間 / リスクの度合い {args.risk}")
     for e in new_events:
         if e["kind"] == "decision":
             mark_ = "通過" if e.get("approved") else ("見送り" if not e.get("rejected") else f"却下: {e['rejected']}")
@@ -417,9 +450,67 @@ def main() -> int:
             detail = f"{e.get('symbol', '')} {e.get('units', 0):+,.0f} @ {e.get('price', e.get('exit_price', ''))}"
             pnl = f" 損益 {e['pnl']:+,.0f}円" if "pnl" in e else ""
             print(f"  [{e['account']}] {e['kind']} {detail}{pnl} {e.get('reason', '')}")
-    for acc in accounts.values():
-        print(f"  {acc.name:<22} 評価額 {acc.equity:>9,.0f}円")
+    if not paused:
+        for acc in accounts.values():
+            print(f"  {acc.name:<22} 評価額 {acc.equity:>9,.0f}円")
     return 0
+
+
+def sync_live() -> None:
+    """実際の約定・建玉・資産を読んで記録する（読むだけ。失敗しても止めない）。"""
+    try:
+        from fx_live_sync import sync
+
+        live = sync(quiet=True)
+        if live["new"] or live["errors"]:
+            print(f"  実際の約定: 新しく {live['new']} 件" + (f"（読めなかったもの {len(live['errors'])} 件）" if live["errors"] else ""))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  実際の約定を読めませんでした: {type(exc).__name__}")
+
+
+def trade_live(ctx: "Context") -> None:
+    """実際の口座で、判断する者ごとに、実際の建玉を見て判断し、発注する。"""
+    from fx_live_trade import LiveSession
+
+    from jqbt.application.fx_live_trade import Intent
+
+    session = LiveSession.open()
+    if session is None:
+        return
+    intents: list[Intent] = []
+    for name in session.config.accounts:
+        view = live_view(name, session)
+        account_frame = frame_for(name, ctx)
+        for decision, reason, extra in decide(name, view, ctx, []):
+            equity = session.equity
+            approved, rejected = check(
+                decision, account_frame, equity=equity, holding=view.position.symbol if view.position else None,
+                spread_pips={s: q["spread"] for s, q in ctx.quotes.items()},
+                prices={s: q["ask"] for s, q in ctx.quotes.items()}, instruments=ctx.insts, halted=False,
+            )
+            session.events.append({"kind": "live_decision", "at": ctx.now.isoformat(), "account": name,
+                                   "decision": {k: v for k, v in decision.items() if k != "context"},
+                                   "approved": approved is not None, "rejected": rejected,
+                                   **{k: v for k, v in extra.items() if k in ("logic", "model", "prompt_version",
+                                                                             "confidence", "reused")}})
+            if approved is None:
+                continue
+            intents.append(Intent(account=name, action="close" if approved.action == "close" else "open",
+                                  at=ctx.now.isoformat(), symbol=approved.symbol, units=approved.units,
+                                  stop_pips=approved.stop_pips, take_pips=approved.take_pips, reason=reason))
+    session.execute(intents)
+    session.finish()
+
+
+def live_view(name: str, session) -> PaperAccount:
+    """実際の口座を、判断する者が見る形にする（建玉は、このシステムがその判断する者のために建てたもの）。"""
+    p = session.position_of(name)
+    position = None
+    if p is not None:
+        sign = 1 if p.side == "BUY" else -1
+        position = PaperPosition(p.symbol, sign * p.size, float(p.price or 0), p.stop, p.take, p.opened_at, "実際の建玉")
+    equity = session.equity
+    return PaperAccount(name, equity, equity, position, equity=equity, day_start_equity=equity)
 
 
 if __name__ == "__main__":
