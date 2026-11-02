@@ -10,7 +10,7 @@ data "google_project" "this" {}
 
 locals {
   name     = "algo-trading"
-  services = ["run", "artifactregistry", "cloudbuild", "iap", "aiplatform", "secretmanager", "storage", "cloudscheduler"]
+  services = ["run", "artifactregistry", "cloudbuild", "iap", "aiplatform", "secretmanager", "storage", "cloudscheduler", "compute"]
   image    = "${var.region}-docker.pkg.dev/${var.project}/${google_artifact_registry_repository.images.repository_id}/gui"
 }
 
@@ -201,6 +201,11 @@ resource "google_cloud_run_v2_service" "gui" {
         name  = "STATE_BUCKET"
         value = google_storage_bucket.state.name
       }
+      # 画面に「注文を出す設定か」を出すため（画面からは注文しない）
+      env {
+        name  = "FX_LIVE_ENABLED"
+        value = tostring(var.fx_live_enabled)
+      }
       env {
         name  = "GCP_PROJECT"
         value = var.project
@@ -295,8 +300,20 @@ resource "google_cloud_run_v2_job" "fx_paper" {
       service_account       = google_service_account.gui.email
       execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
       timeout               = "600s"
-      # やり直すと同じ1時間に二重に判断するので、やり直さない（次の1時間に任せる）
+      # やり直すと同じ回に二重に判断するので、やり直さない（次の回に任せる）
       max_retries = 0
+
+      # 自動売買の出口: 外に出るときの IP を固定する（注文用のキーをこの IP だけに制限するため）
+      dynamic "vpc_access" {
+        for_each = var.fx_live_egress ? [1] : []
+        content {
+          egress = "ALL_TRAFFIC"
+          network_interfaces {
+            network    = google_compute_network.egress[0].id
+            subnetwork = google_compute_subnetwork.egress[0].id
+          }
+        }
+      }
 
       containers {
         image   = "${local.image}:${var.image_tag}"
@@ -331,6 +348,10 @@ resource "google_cloud_run_v2_job" "fx_paper" {
         env {
           name  = "FX_PAPER_RISK"
           value = var.fx_paper_risk
+        }
+        env {
+          name  = "FX_LIVE_ENABLED"
+          value = tostring(var.fx_live_enabled)
         }
         volume_mounts {
           name       = "state"
@@ -411,4 +432,45 @@ resource "google_iap_settings" "oauth" {
     }
   }
   depends_on = [google_project_service.apis]
+}
+
+# --- 自動売買の出口（固定 IP） --------------------------------------------------------
+# GMOコインの注文用のキーは、この IP だけから使えるようにする。fx_live_egress = true のときだけ作る（固定 IP は有料）
+
+resource "google_compute_network" "egress" {
+  count                   = var.fx_live_egress ? 1 : 0
+  name                    = "${local.name}-egress"
+  auto_create_subnetworks = false
+  depends_on              = [google_project_service.apis]
+}
+
+resource "google_compute_subnetwork" "egress" {
+  count         = var.fx_live_egress ? 1 : 0
+  name          = "${local.name}-egress"
+  region        = var.region
+  network       = google_compute_network.egress[0].id
+  ip_cidr_range = "10.8.0.0/26"
+}
+
+resource "google_compute_address" "egress" {
+  count  = var.fx_live_egress ? 1 : 0
+  name   = "${local.name}-egress"
+  region = var.region
+}
+
+resource "google_compute_router" "egress" {
+  count   = var.fx_live_egress ? 1 : 0
+  name    = "${local.name}-egress"
+  region  = var.region
+  network = google_compute_network.egress[0].id
+}
+
+resource "google_compute_router_nat" "egress" {
+  count                              = var.fx_live_egress ? 1 : 0
+  name                               = "${local.name}-egress"
+  router                             = google_compute_router.egress[0].name
+  region                             = var.region
+  nat_ip_allocate_option             = "MANUAL_ONLY"
+  nat_ips                            = [google_compute_address.egress[0].self_link]
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }

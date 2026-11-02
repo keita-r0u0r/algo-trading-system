@@ -442,7 +442,8 @@ def page_fx_lab() -> None:
 
 
 def page_fx_live() -> None:
-    header("実際の約定", "GMOコインの口座から読んだ約定・建玉・資産。読むだけで、注文は出していません")
+    header("実際の約定", "GMOコインの口座の約定・建玉・資産と、自動売買の記録")
+    show_flash()
     from jqbt.application.fx_live import summarize
     from jqbt.infrastructure import fx_live_log
 
@@ -488,6 +489,44 @@ def page_fx_live() -> None:
         else:
             st.caption("まだありません")
     st.caption(f"最後に読んだ時刻: {last.get('at', '—')}。ずれは、約定した1分足の始まりの買値・売値との差（目安）")
+
+    # 自動売買（実際のお金）
+    st.subheader("自動売買")
+    kill = ROOT / "state" / "KILL_fx_live"
+    live = [e for e in events if str(e.get("kind", "")).startswith("live_")]
+    enabled = os.environ.get("FX_LIVE_ENABLED", "").lower() == "true"
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        st.markdown(
+            ("" if not enabled else "") +
+            (pill("注文を出す設定", "ok") if enabled else pill("注文を出さない設定（記録だけ）", "info")) + " " +
+            (pill("キルスイッチ: 入", "bad") if kill.exists() else pill("キルスイッチ: 切", "ok")),
+            unsafe_allow_html=True)
+        st.caption("まねる口座: AI・金利差＋流れ（ドル円）。1口座100通貨まで、損切りは GMOコイン側に置く。"
+                   "注文を出す設定は infra の fx_live_enabled（画面の Cloud Run では表示だけ）")
+        if kill.exists():
+            st.caption(kill.read_text(encoding="utf-8"))
+    with c2:
+        if kill.exists():
+            if st.button("キルスイッチを切る（再開）", icon=":material/play_arrow:"):
+                kill.unlink(missing_ok=True)
+                flash("キルスイッチを切りました")
+        elif st.button("キルスイッチを入れる（新しい注文を止める）", type="primary", icon=":material/block:"):
+            kill.parent.mkdir(parents=True, exist_ok=True)
+            kill.write_text(f"{dt.datetime.now().isoformat(timespec='seconds')} 画面から止めた", encoding="utf-8")
+            flash("キルスイッチを入れました。新しい注文は出しません（決済は出します）", "warning")
+    with st.container(border=True):
+        st.markdown("**自動売買の記録**")
+        if live:
+            st.dataframe(pd.DataFrame([{
+                "時刻": e.get("at", "")[5:16].replace("T", " "), "種類": e["kind"].removeprefix("live_"),
+                "口座": vm.account_label(e.get("account", "")), "通貨": e.get("symbol", ""),
+                "建玉ID": e.get("position_id"), "値段": e.get("price"),
+                "内容": e.get("reason") or e.get("error") or e.get("note") or
+                        (f"損切り {e.get('stop')} / 利確 {e.get('take')}" if e["kind"] == "live_protect" else ""),
+            } for e in reversed(live)][:100]), hide_index=True, width="stretch")
+        else:
+            st.caption("まだありません")
 
 
 # ----------------------------------------------------------------------
