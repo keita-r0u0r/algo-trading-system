@@ -803,6 +803,30 @@ def live_overview() -> None:
         else:
             st.caption("持っていません")
     with st.container(border=True):
+        st.markdown("**判断する者ごとの今の状態**（15分ごとの回で判断。見送りも含む）")
+        latest: dict[str, dict] = {}
+        for e in events:
+            if e.get("kind") == "live_decision":
+                latest[e["account"]] = e
+        owners_now = {r["判断する者"]: r for r in positions}
+        rows = []
+        for name in LiveConfig().accounts:
+            e = latest.get(name, {})
+            d = e.get("decision") or {}
+            action = {"hold": "見送り・持ち続ける", "close": "閉じる", "open_long": "買う", "open_short": "売る"}.get(
+                d.get("action"), d.get("action") or "—")
+            held = owners_now.get(vm.account_label(name))
+            rows.append({
+                "判断する者": vm.account_label(name),
+                "最後の判断": e.get("at", "")[5:16].replace("T", " ") or "—",
+                "判断": action + ("" if not d or e.get("approved") or d.get("action") == "hold"
+                                 else f"（却下: {e.get('rejected')}）"),
+                "建玉": f"{held['通貨']} {held['売買']} {held['数量']:.0f}（{held['含み損益']:+,} 円）" if held else "なし",
+                "根拠・見た数字": (d.get("reasoning") or ", ".join(
+                    f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")))[:120],
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    with st.container(border=True):
         st.markdown("**最近の動き**")
         activity = [e for e in events if e.get("kind") in ("live_open", "live_close", "live_gone", "live_fatal",
                                                               "live_error", "live_skip")

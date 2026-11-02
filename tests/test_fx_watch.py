@@ -26,30 +26,30 @@ def wake(now, h, positions=(), last=None, fired=None):
 
 
 def test_sudden_move_wakes():
-    h = history([(at(10, 5), 157.00), (at(10, 8), 157.20)])
-    assert wake(at(10, 8), h).startswith("急変: USD_JPY が 5分で +20.0 pips")
+    h = history([(at(10, 5), 157.00), (at(10, 7), 157.20)])
+    assert wake(at(10, 7), h).startswith("急変: USD_JPY が 5分で +20.0 pips")
 
 
 def test_small_move_and_old_points_do_not_wake():
-    h = history([(at(10, 0), 156.50), (at(10, 6), 157.00), (at(10, 8), 157.05)])  # 10:00 は窓の外で捨てる
-    assert wake(at(10, 8), h) == ""
+    h = history([(at(10, 0), 156.50), (at(10, 6), 157.00), (at(10, 7), 157.05)])  # 10:00 は窓の外で捨てる
+    assert wake(at(10, 7), h) == ""
 
 
 def test_near_stop_wakes():
-    h = history([(at(10, 7), 157.00), (at(10, 8), 157.02)])
+    h = history([(at(10, 6), 157.00), (at(10, 7), 157.02)])
     pos = [{"account": "ai", "symbol": "USD_JPY", "stop": 157.00, "take": 157.50}]
-    assert "損切り" in wake(at(10, 8), h, pos)
+    assert "損切り" in wake(at(10, 7), h, pos)
 
 
 def test_cooldown_and_scheduled_guard():
-    h = history([(at(10, 5), 157.00), (at(10, 8), 157.30)])
-    assert wake(at(10, 8), h, last=at(10, 6)) == ""  # 直前に起こした
+    h = history([(at(10, 5), 157.00), (at(10, 7), 157.30)])
+    assert wake(at(10, 7), h, last=at(10, 6)) == ""  # 直前に起こした
     h2 = history([(at(10, 12), 157.00), (at(10, 14), 157.30)])
     assert wake(at(10, 14), h2) == ""  # 10:15 の定期の回が近い
 
 
 def test_session_open_fires_once():
-    h = history([(at(17, 3), 157.00)])
+    h = history([(at(17, 2), 157.00)])
     fired = set()
-    assert "17:00" in wake(at(17, 3), h, fired=fired)
-    assert wake(at(17, 8), h, fired=fired) == ""
+    assert "17:00" in wake(at(17, 2), h, fired=fired)
+    assert wake(at(17, 7), h, fired=fired) == ""
