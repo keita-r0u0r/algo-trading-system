@@ -777,6 +777,9 @@ def health_panel(events: list[dict]) -> None:
     with st.expander(f"{icon[worst(findings)]} 健康診断 — {label}", expanded=bool(bad)):
         for f in findings:
             st.markdown(f"{icon.get(f.state, '⚪')} **{vm.account_label(f.name)}** — {f.text}")
+            if f.state in ("bad", "warn") and (f.impact or f.action):
+                st.markdown(f"<div style='margin:-.4rem 0 .6rem 1.6rem;color:#64748b;font-size:.88rem'>"
+                            f"影響: {f.impact or '—'}<br>やること: <b>{f.action or '—'}</b></div>", unsafe_allow_html=True)
 
 
 def watch_panel() -> None:
@@ -1390,10 +1393,12 @@ with st.sidebar:
         _findings = health_findings()
         _state = _worst(_findings)
         _bad = [f for f in _findings if f.state in ("bad", "warn")]
-        if _state == "bad":
-            st.error("異常あり: " + "、".join(f"{vm.account_label(f.name)}（{f.text[:20]}）" for f in _bad[:3]))
-        elif _state == "warn":
-            st.warning("注意: " + "、".join(f"{vm.account_label(f.name)}（{f.text[:20]}）" for f in _bad[:3]))
+        if _bad:
+            _top = _bad[0]
+            (st.error if _state == "bad" else st.warning)(
+                f"**{'異常' if _state == 'bad' else '注意'}: {vm.account_label(_top.name)}** — {_top.text}\n\n"
+                + (f"やること: {_top.action}" if _top.action else "")
+                + (f"\n\nほかに {len(_bad) - 1} 件（概要のいちばん上）" if len(_bad) > 1 else ""))
         else:
             st.success("健康診断: 正常")
     except Exception as exc:  # 診断そのものが壊れても、画面は出す（壊れたことは見せる）
