@@ -35,9 +35,13 @@ class SyncedFile:
 
     def pull(self) -> None:
         content, generation = self._download()
+        self._generation, self._pulled_size = generation, len(content)
+        if generation == "0":
+            # クラウドに無い。空のファイルを作ると、読む側が壊れた JSON として失敗するので、手元からも消す
+            self.local.unlink(missing_ok=True)
+            return
         self.local.parent.mkdir(parents=True, exist_ok=True)
         self.local.write_bytes(content)
-        self._generation, self._pulled_size = generation, len(content)
 
     def push(self, tries: int = 5) -> bool:
         """手元で足した分を上げる。足した分が無ければ何もしない。"""

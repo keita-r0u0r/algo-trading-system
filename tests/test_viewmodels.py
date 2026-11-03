@@ -95,3 +95,27 @@ def test_decider_health_for_rule_logic():
     assert decider_health(ok, "carry_trend_USD_JPY", now)["state"] == "ok"
     broken = [_decision(now - dt.timedelta(minutes=3), account="carry_trend_USD_JPY")]
     assert "ロジック" in decider_health(broken, "carry_trend_USD_JPY", now)["text"]
+
+
+def test_explain_carry_hold_is_readable():
+    from jqbt.interfaces.viewmodels import action_label, explain_decision
+
+    e = {"kind": "live_decision", "account": "carry_trend_USD_JPY", "decision": {"action": "hold"},
+         "logic": {"carry_percent": 1.88, "last_close": 157.588, "average_50d": 157.441, "target": 1, "held": 1}}
+    text = explain_decision(e, holding=True)
+    assert "金利差は +1.88%" in text and "平均 157.441 より上" in text and "持ち続ける" in text
+    assert action_label(e["decision"], True) == "持ち続ける"
+    assert action_label(e["decision"], False) == "建てない（様子見）"
+
+
+def test_explain_ai_default_hold_and_holdings():
+    from jqbt.interfaces.viewmodels import explain_decision, holdings_over_time
+
+    assert "呼べなかった" in explain_decision({"error": "PermissionDenied", "decision": {"action": "hold"}})
+    assert "呼ぶ回ではない" in explain_decision({"note": "x", "decision": {"action": "hold"}})
+    events = [{"kind": "live_decision", "account": "ai"},
+              {"kind": "live_open", "account": "ai", "position_id": 1},
+              {"kind": "live_decision", "account": "ai"},
+              {"kind": "live_gone", "account": "ai"},
+              {"kind": "live_decision", "account": "ai"}]
+    assert holdings_over_time(events) == [False, None, True, None, False]
