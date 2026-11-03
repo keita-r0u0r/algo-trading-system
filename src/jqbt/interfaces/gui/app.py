@@ -758,11 +758,14 @@ def page_overview() -> None:
 def health_findings(events: list[dict] | None = None) -> list:
     """健康診断（application/fx_health.py）。画面の上と、反映後の確認が同じものを使う。"""
     from jqbt.application.fx_health import check_all
+    from jqbt.infrastructure import econ_calendar
+    from jqbt.interfaces.fx_runtime import CALENDAR
 
     return check_all(dt.datetime.now(JST), watch=watcher_state(), live_events=live_log() if events is None else events,
                      accounts=LiveConfig().accounts,
                      live_enabled=os.environ.get("FX_LIVE_ENABLED", "").lower() == "true",
-                     killed=KILL_LIVE.exists(), paper_paused=PAUSE_PAPER.exists())
+                     killed=KILL_LIVE.exists(), paper_paused=PAUSE_PAPER.exists(),
+                     calendar=econ_calendar.read(CALENDAR))
 
 
 def health_panel(events: list[dict]) -> None:
@@ -826,6 +829,35 @@ def watch_panel() -> None:
             st.caption("見張り役が起動してから、急変などで起こした回はまだありません")
         if not snap:
             st.caption("監視の詳しい様子は、見張り役が新しい版になると出ます")
+    calendar_panel(now)
+
+
+def calendar_panel(now: dt.datetime) -> None:
+    """この先24時間の経済指標の発表（AI の材料。重要なものの前後は短期売買が建てない）。"""
+    from jqbt.application import fx_calendar
+    from jqbt.infrastructure import econ_calendar
+    from jqbt.interfaces.fx_runtime import CALENDAR, SYMBOLS
+
+    data = econ_calendar.read(CALENDAR)
+    rows = fx_calendar.upcoming(fx_calendar.parse(data.get("events") or []), now, SYMBOLS,
+                                ahead=dt.timedelta(hours=24), behind=dt.timedelta(hours=1))
+    with st.container(border=True):
+        fetched = (data.get("fetched_at") or "")[5:16].replace("T", " ")
+        st.markdown("**経済指標の予定**（この先24時間・重要度が中以上）"
+                    + (f" — {fetched} に取得" if fetched else ""))
+        if data.get("error"):
+            st.caption(f"最後の取得に失敗（{data['error']}）。前に取った予定を使っています。1時間ごとに取り直します")
+        if not data:
+            st.caption("まだ取得していません（判断の回が1時間ごとに取ってきます）")
+        elif not rows:
+            st.caption("この先24時間に、関係する発表はありません")
+        else:
+            st.dataframe(pd.DataFrame([{
+                "時刻": r["at_jst"], "あと": (f"{r['minutes_from_now'] // 60}時間{r['minutes_from_now'] % 60}分"
+                                         if r["minutes_from_now"] >= 0 else "発表済み"),
+                "通貨": r["currency"], "指標": r["title"], "重要度": r["impact"],
+                "予想": r["forecast"] or "—", "前回": r["previous"] or "—",
+            } for r in rows]), hide_index=True, width="stretch")
 
 
 def live_overview() -> None:
@@ -939,8 +971,11 @@ def scalp_body() -> None:
     except OSError:
         events = []
     now_state = (watcher_state().get("scalp") or {})
-    st.caption("うまくいきそうなら、実運用に展開するかを決めます。コストはスプレッド（売値と買値の差）と手数料を込みで計算しています。"
-               "損切り・利確はその値段ちょうどで約定したことにしているので、実際より少し甘めです。")
+    st.caption("うまくいきそうなら、実運用に展開するかを決めます。コストはスプレッド（売値と買値の差）で計算しています"
+               "（GMOコインの手数料は0円）。損切り・利確はその値段ちょうどで約定したことにしているので、実際より少し甘めです。"
+               "重要な経済指標の発表の前10分・後15分は、新しく建てません。")
+    for sym, why in (now_state.get("quiet") or {}).items():
+        st.warning(f"{vm.PAIR_LABELS.get(sym, sym)}: いまは新しく建てない（{why}）", icon=":material/event:")
     cols = st.columns(len(fx_scalp.RULES))
     for col, rule in zip(cols, fx_scalp.RULES):
         s = fx_scalp.summary(events, rule.name)

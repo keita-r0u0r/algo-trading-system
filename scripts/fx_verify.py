@@ -71,7 +71,8 @@ def check_once(read, exists, version: str | None) -> tuple[str, list[str]]:
     events = [json.loads(line) for line in read("state/fx_live.jsonl").decode().splitlines() if line.strip()]
     findings = check_all(now, watch=watch, live_events=events, accounts=LiveConfig().accounts,
                          live_enabled=True, killed=exists("state/KILL_fx_live"),
-                         paper_paused=exists("state/PAUSE_fx_paper"))
+                         paper_paused=exists("state/PAUSE_fx_paper"),
+                         calendar=json.loads(read("state/fx_calendar.json") or b"{}"))
     lines = [f"{f.state:>4}  {f.name}: {f.text}" for f in findings]
     if version:
         if watch.get("version") != version:

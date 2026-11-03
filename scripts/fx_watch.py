@@ -54,7 +54,7 @@ class Cloud:
         bucket = os.environ["STATE_BUCKET"]
         self.bucket = bucket
         self.files = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
-                      for n in ("fx_live.jsonl", "ai_usage.jsonl")]
+                      for n in ("fx_live.jsonl", "ai_usage.jsonl", "fx_calendar.json")]
         self.read_only = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
                           for n in ("ai_settings.json", "ai_models.json", "fx_positions.json")]
         self.flags = [SyncedFlag(self.http, bucket, "state/KILL_fx_live", state_dir / "KILL_fx_live")]
@@ -127,12 +127,28 @@ class ScalpPaper:
             events = []
         self.accounts = [fx_scalp.restore(rule, events) for rule in fx_scalp.RULES]
         self.window = fx_scalp.TickWindow(max(rule.trigger_seconds for rule in fx_scalp.RULES))
+        #: 経済指標の予定（判断の回が1時間ごとに取り直す。ここでは1分ごとに読み直す）
+        self.calendar: list = []
+        self.quiet: dict[str, str] = {}
+
+    def refresh_calendar(self, path: Path) -> None:
+        from jqbt.application import fx_calendar
+        from jqbt.infrastructure import econ_calendar
+
+        self.calendar = fx_calendar.parse(econ_calendar.read(path).get("events") or [])
 
     def on_tick(self, symbol: str, at: dt.datetime, bid: float, ask: float) -> None:
+        from jqbt.application import fx_calendar
+
         self.window.add(symbol, at, (bid + ask) / 2)
+        quiet = fx_calendar.quiet_reason(self.calendar, symbol, at)
+        if quiet:
+            self.quiet[symbol] = quiet
+        else:
+            self.quiet.pop(symbol, None)
         events = []
         for account in self.accounts:
-            events += fx_scalp.on_tick(account, self.window, symbol, at, bid, ask)
+            events += fx_scalp.on_tick(account, self.window, symbol, at, bid, ask, quiet=quiet)
         if events:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as f:
@@ -142,12 +158,12 @@ class ScalpPaper:
                           f"{e.get('price', e.get('exit'))} {e.get('reason', e.get('trigger', ''))}", flush=True)
 
     def state(self) -> dict:
-        return {a.rule.name: {"cash": round(a.cash, 1), "trades": a.trades, "wins": a.wins,
+        return {"quiet": dict(self.quiet), **{a.rule.name: {"cash": round(a.cash, 1), "trades": a.trades, "wins": a.wins,
                               "position": None if a.position is None else {
                                   "symbol": a.position.symbol, "side": "BUY" if a.position.side > 0 else "SELL",
                                   "price": a.position.price, "stop": a.position.stop, "take": a.position.take,
                                   "opened_at": a.position.opened_at.isoformat(timespec="seconds")}}
-                for a in self.accounts}
+                for a in self.accounts}}
 
 
 def current_positions(state_dir: Path) -> list[dict]:
@@ -195,6 +211,7 @@ async def watch(dry_run: bool) -> None:
     if cloud:
         cloud.scalp.pull()
     scalp = ScalpPaper(rt.STATE / "fx_scalp.jsonl")
+    scalp.refresh_calendar(rt.CALENDAR)
     ticks = TickRecorder()
     history = PriceHistory(dt.timedelta(minutes=CONFIG.window_minutes))
     state = {"started_at": dt.datetime.now(JST).isoformat(timespec="seconds"), "last_tick": None,
@@ -272,6 +289,7 @@ async def watch(dry_run: bool) -> None:
                                                         fired_sessions=fired)
                         state["next_periodic_at"] = (now + dt.timedelta(seconds=max(0.0, next_periodic - clock))
                                                      ).isoformat(timespec="seconds") if trades else None
+                        scalp.refresh_calendar(rt.CALENDAR)
                         state["scalp"] = scalp.state()
                         try:
                             await asyncio.to_thread(cloud.scalp.push)

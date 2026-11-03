@@ -77,3 +77,15 @@ def test_market_closed_is_not_an_alarm():
     findings = check_all(saturday, watch={**healthy_watch(), "last_tick": iso(NOW)}, live_events=[], accounts=ACCOUNTS,
                          live_enabled=True, killed=False, paper_paused=False)
     assert worst(findings) == "info"
+
+
+def test_calendar_stale_is_a_warning():
+    from jqbt.application.fx_health import check_all
+
+    now = dt.datetime(2026, 11, 4, 15, 0, tzinfo=JST)
+    common = dict(watch={}, live_events=[], accounts=[], live_enabled=True, killed=False, paper_paused=False)
+    old = check_all(now, **common, calendar={"fetched_at": "2026-11-04T10:00:00+09:00", "error": "x"})
+    assert [f.state for f in old if f.name == "経済指標の予定"] == ["warn"]
+    fresh = check_all(now, **common, calendar={"fetched_at": "2026-11-04T14:30:00+09:00"})
+    assert [f.state for f in fresh if f.name == "経済指標の予定"] == ["ok"]
+    assert not [f for f in check_all(now, **common) if f.name == "経済指標の予定"]

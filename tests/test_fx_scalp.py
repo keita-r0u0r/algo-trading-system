@@ -68,3 +68,14 @@ def test_old_fee_is_given_back():
     assert s["pnl"] == 30.0 and s["fees"] == 0
     account = restore(RULES[0], events)
     assert account.cash == 10030.0 and account.trades == 2 and account.wins == 1
+
+
+def test_quiet_blocks_new_positions_only():
+    account = ScalpAccount(RULES[0])
+    window = TickWindow(60)
+    t0 = dt.datetime(2026, 11, 6, 22, 25, tzinfo=dt.timezone.utc)
+    for sec, bid, ask in [(0, 158.000, 158.002), (30, 158.060, 158.062)]:
+        window.add("USD_JPY", t0 + dt.timedelta(seconds=sec), (bid + ask) / 2)
+    at = t0 + dt.timedelta(seconds=30)
+    assert on_tick(account, window, "USD_JPY", at, 158.060, 158.062, quiet="発表の5分前") == []
+    assert on_tick(account, window, "USD_JPY", at, 158.060, 158.062)[0]["kind"] == "scalp_open"

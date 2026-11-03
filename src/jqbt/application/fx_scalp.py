@@ -16,6 +16,8 @@
     scalp-v1 は誤って 0.002%（1,000通貨で往復 約4.4円）を引いていたので、成績ではその分を戻して数える
   * 損切り・利確は、値段が届いたその値段で約定したことにする（実際はずれることがある。甘めの見積もり）
   * スプレッドが ``max_spread_pips`` を超えるときは建てない。建玉は口座ごとに1つ。閉じたあと ``cooldown_seconds`` は建てない
+  * 重要な経済指標の発表の前後（``application/fx_calendar.py`` の ``quiet_reason``）は、新しく建てない（scalp-v3）。
+    発表直後は値段が飛び、損切りが届いた値段で約定しない（この見積もりより悪くなる）から
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-SCALP_VERSION = "scalp-v2"
+SCALP_VERSION = "scalp-v3"
 FEE_RATE = 0.0
 
 
@@ -117,8 +119,11 @@ def _close(account: ScalpAccount, at: dt.datetime, price: float, reason: str) ->
 
 
 def on_tick(account: ScalpAccount, window: TickWindow, symbol: str, at: dt.datetime, bid: float,
-            ask: float) -> list[dict[str, Any]]:
-    """値段が1つ届いたときの判断と仮想の約定。``window`` には、この値段をもう足してあること。記録する出来事を返す。"""
+            ask: float, *, quiet: str | None = None) -> list[dict[str, Any]]:
+    """値段が1つ届いたときの判断と仮想の約定。``window`` には、この値段をもう足してあること。記録する出来事を返す。
+
+    ``quiet`` があれば（重要な発表の前後）、新しくは建てない。持っている建玉の損切り・利確はいつもどおり。
+    """
     rule, events = account.rule, []
     p = account.position
     if p is not None:
@@ -134,7 +139,7 @@ def on_tick(account: ScalpAccount, window: TickWindow, symbol: str, at: dt.datet
         elif (at - p.opened_at).total_seconds() >= rule.max_hold_seconds:
             events.append(_close(account, at, exit_price, f"{rule.max_hold_seconds // 60}分たった"))
         return events
-    if account.last_closed_at and (at - account.last_closed_at).total_seconds() < rule.cooldown_seconds:
+    if quiet or (account.last_closed_at and (at - account.last_closed_at).total_seconds() < rule.cooldown_seconds):
         return events
     move_pips = window.move(symbol) / rule.pip
     if abs(move_pips) < rule.trigger_pips:
