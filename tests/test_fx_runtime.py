@@ -80,3 +80,13 @@ def test_position_numbers_are_precomputed_for_ai():
     short = PaperPosition("EUR_JPY", -1000, 176.737, 177.0, 176.5, "", "")
     s = rt.position_numbers(short, {"bid": 176.70, "ask": 176.717})
     assert s["unrealized_pips"] == 2.0 and s["unrealized_yen"] == 20.0 and s["pips_to_take"] == 21.7
+
+
+def test_ai_skip_reason_says_when_and_why(state):
+    now = dt.datetime(2026, 11, 3, 12, 5, tzinfo=JST)
+    ctx = rt.Context(api=None, now=now, frame=None, carry_frame=None, live_frame=None, insts={}, quotes={}, bars={},
+                     ai=object(), today_rates={}, short={}, ai_due=False, ai_last=now - dt.timedelta(minutes=5))
+    text = rt.ai_skip_reason(ctx)
+    assert "12:00（5分前）" in text and "12:15 ごろ" in text and "急変" in text
+    [(decision, _, extra)] = rt.decide("ai", None, ctx, [])
+    assert decision == {"action": "hold"} and extra["note"] == text

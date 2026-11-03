@@ -779,11 +779,58 @@ def health_panel(events: list[dict]) -> None:
             st.markdown(f"{icon.get(f.state, '⚪')} **{vm.account_label(f.name)}** — {f.text}")
 
 
+def watch_panel() -> None:
+    """常時監視: 見張り役が今なにを見張っていて、判断を起こす線まであとどれくらいか。"""
+    state = watcher_state()
+    snap = state.get("watch") or {}
+    now = dt.datetime.now(JST)
+    with st.container(border=True):
+        last = state.get("last_tick")
+        age = (now - dt.datetime.fromisoformat(last)).total_seconds() if last else None
+        head = ("🟢 見張り中" if age is not None and age < 180 else "🔴 値段が届いていない") if last else "🔴 見張り役が動いていない"
+        rules = snap.get("rules") or {}
+        st.markdown(f"**常時監視** — {head}"
+                    + (f"（最後の値段 {int(age)}秒前・版 {state.get('version') or '?'}）" if age is not None else ""))
+        cols = st.columns(3)
+        cols[0].metric("次の定期判断", (state.get("next_periodic_at") or "")[11:16] or "—", help="5分ごと")
+        cols[1].metric("最後の判断の回", (state.get("last_ok_cycle") or "")[11:16] or "—",
+                       help="実際の口座に届いた最後の回")
+        cols[2].metric("次の時間帯の切り替わり", snap.get("next_session") or "—", help="この時刻に判断を起こす")
+        if snap.get("cooldown_until"):
+            st.caption(f"直前に起こしたので、{snap['cooldown_until'][11:16]} までは起こさない（5分の間隔）")
+        if snap.get("symbols"):
+            move_line = rules.get("move_pips", 15)
+            st.dataframe(pd.DataFrame([{
+                "通貨": vm.PAIR_LABELS.get(sym, sym), "今の値段": v.get("price"),
+                f"{rules.get('window_minutes', 5)}分の動き": f"{v.get('move_pips', 0):+.1f} pips",
+                "起こす線まで": f"あと {v.get('to_wake_pips', 0):.1f} pips（±{move_line:g}）",
+            } for sym, v in snap["symbols"].items()]), hide_index=True, width="stretch")
+        live_positions = [r for r in snap.get("positions", []) if r.get("venue") == "live"]
+        if live_positions:
+            near = rules.get("near_pips", 3)
+            st.dataframe(pd.DataFrame([{
+                "見張っている建玉": vm.account_label(r.get("account", "")), "通貨": vm.PAIR_LABELS.get(r["symbol"], r["symbol"]),
+                "損切りまで": f"{r['pips_to_stop']:.1f} pips" if r.get("pips_to_stop") is not None else "—",
+                "利確まで": f"{r['pips_to_take']:.1f} pips" if r.get("pips_to_take") is not None else "利確なし",
+                "起こす線": f"{near:g} pips 以内",
+            } for r in live_positions]), hide_index=True, width="stretch")
+        wakes = state.get("wakes") or []
+        if wakes:
+            st.markdown("**最近の随時判断**（見張り役が起こした回）")
+            for w in reversed(wakes[-5:]):
+                st.markdown(f"`{w['at'][5:16].replace('T', ' ')}` {w['reason']} → {w.get('result', '')}")
+        else:
+            st.caption("見張り役が起動してから、急変などで起こした回はまだありません")
+        if not snap:
+            st.caption("監視の詳しい様子は、見張り役が新しい版になると出ます")
+
+
 def live_overview() -> None:
     prices = quotes()
     price_strip(prices)
     events = live_log()
     health_panel(events)
+    watch_panel()
     snapshots = [e for e in events if e.get("kind") == "snapshot" and live_assets(e)]
     if not snapshots:
         st.info("まだ口座を読んだ記録がありません（15分ごとに読みます）", icon=":material/hourglass_empty:")

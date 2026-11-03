@@ -216,7 +216,10 @@ def explain_decision(e: dict[str, Any], holding: bool | None = None) -> str:
     if e.get("error"):
         return f"AI を呼べなかったので、何もしなかった（{str(e['error'])[:80]}）"
     if e.get("note"):
-        return "AI を呼ぶ回ではないので、何もしなかった（AI は15分ごとと、見張り役が急変などで起こしたときに呼ぶ）"
+        note = str(e["note"])
+        if note.startswith("AI を呼ぶ回ではない（"):  # 理由を記録する前の版
+            return "AI を呼ぶ回ではないので、何もしなかった（AI は15分ごとと、見張り役が急変などで起こしたときに呼ぶ）"
+        return note
     if decision.get("reasoning"):
         return str(decision["reasoning"])
     logic = e.get("logic") or {}
