@@ -70,3 +70,42 @@ def test_watch_snapshot_shows_distance_to_wake():
     assert snap["symbols"]["USD_JPY"] == {"price": 157.95, "move_pips": 5.0, "to_wake_pips": 10.0}
     assert snap["positions"][0]["pips_to_stop"] == 27.4 and "pips_to_take" not in snap["positions"][0]
     assert snap["next_session"] == "17:00" and snap["cooldown_until"] is None
+
+
+LONG = {"venue": "live", "account": "ai", "symbol": "GBP_JPY", "side": "BUY", "price": 212.217,
+        "stop": 212.017, "take": 212.617, "opened_at": "2026-11-03T21:26:00+09:00"}
+
+
+def gbp(points):
+    h = PriceHistory(dt.timedelta(minutes=CFG.window_minutes))
+    for t, mid in points:
+        h.add("GBP_JPY", t, mid)
+    return h
+
+
+def test_loss_review_fires_once_per_level():
+    fired: set[str] = set()
+    # 損切りまで 20 pips。1/3（約 -6.7 pips）を越えたら1回だけ見直す
+    h = gbp([(at(21, 32), 212.20), (at(21, 32, 30), 212.145)])
+    reason = wake(at(21, 32, 30), h, [LONG], fired=fired)
+    assert reason.startswith("見直し: ai の建玉の含み損が損切りまでの33%")
+    assert wake(at(21, 32, 40), h, [LONG], fired=fired) == ""
+    h.add("GBP_JPY", at(21, 33), 212.08)  # 2/3（約 -13.3 pips）
+    assert "67%" in wake(at(21, 33), h, [LONG], fired=fired)
+
+
+def test_gain_giveback_wakes():
+    fired: set[str] = set()
+    peaks: dict[str, float] = {}
+    h = gbp([(at(21, 32), 212.30)])  # +8.3 pips（利確までの1/3 = 13.3 pips にはまだ）
+    assert reason_to_wake(at(21, 32), h, [LONG], CFG, last_wake=None, fired_sessions=fired, peaks=peaks) == ""
+    h.add("GBP_JPY", at(21, 33), 212.26)  # +4.3 pips: 最高 8.3 の 40% 以上を失った
+    reason = reason_to_wake(at(21, 33), h, [LONG], CFG, last_wake=None, fired_sessions=fired, peaks=peaks)
+    assert reason.startswith("含み益の目減り: ai の建玉が最高 +8.3 pips から +4.3 pips に減った")
+    assert reason_to_wake(at(21, 33, 20), h, [LONG], CFG, last_wake=None, fired_sessions=fired, peaks=peaks) == ""
+
+
+def test_small_gains_do_not_trigger_giveback():
+    peaks: dict[str, float] = {}
+    h = gbp([(at(21, 32), 212.25), (at(21, 33), 212.22)])  # 最高 +3.3 pips（5 pips 未満）
+    assert reason_to_wake(at(21, 33), h, [LONG], CFG, last_wake=None, fired_sessions=set(), peaks=peaks) == ""

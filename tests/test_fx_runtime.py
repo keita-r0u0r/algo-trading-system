@@ -112,3 +112,20 @@ def test_plan_when_opened_is_found_for_paper_and_live():
               "decision": {**decision, "symbol": "EUR_JPY"}}]
     assert rt.plan_when_opened("ai", position, paper, now) is None
     assert rt.plan_when_opened("ai", None, live, now) is None
+
+
+def test_active_notes_respects_expiry_and_delete(tmp_path):
+    import datetime as dt
+    import json
+
+    from jqbt.interfaces.fx_runtime import active_notes
+
+    jst = dt.timezone(dt.timedelta(hours=9))
+    now = dt.datetime(2026, 11, 3, 22, 0, tzinfo=jst)
+    path = tmp_path / "fx_notes.jsonl"
+    rows = [{"kind": "note", "id": "a", "at": "2026-11-03T21:00:00+09:00", "until": "2026-11-04T00:00:00+09:00", "text": "建てない"},
+            {"kind": "note", "id": "b", "at": "2026-11-03T18:00:00+09:00", "until": "2026-11-03T21:00:00+09:00", "text": "期限切れ"},
+            {"kind": "note", "id": "c", "at": "2026-11-03T21:30:00+09:00", "until": "2026-11-04T00:00:00+09:00", "text": "消した"},
+            {"kind": "delete", "id": "c"}]
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    assert [n["text"] for n in active_notes(now, path)] == ["建てない"]

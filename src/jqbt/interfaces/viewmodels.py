@@ -13,6 +13,8 @@ from typing import Any, Sequence
 from ..core.gates import Check, IMPLEMENTED, Mode
 from ..core.risk import RiskLimits, is_loosening
 
+JST = dt.timezone(dt.timedelta(hours=9))
+
 MODE_LABELS = {
     Mode.STOP: "0 停止",
     Mode.SIGNAL: "1 シグナルのみ",
@@ -260,3 +262,31 @@ def explain_decision(e: dict[str, Any], holding: bool | None = None) -> str:
     if account == "no_trade":
         return "一切売買しない（比べる基準）"
     return ""
+
+
+def ai_last_real_call(events: Sequence[dict[str, Any]], account: str = "ai") -> dt.datetime | None:
+    """AI を実際に呼んだ最後の時刻（呼ばなかった回・失敗した回は除く）。"""
+    for e in reversed(events):
+        if (e.get("kind") == "live_decision" and e.get("account") == account and e.get("model")
+                and not e.get("note") and not e.get("error") and not e.get("reused")):
+            return dt.datetime.fromisoformat(e.get("logged_at") or e["at"])
+    return None
+
+
+def ai_next_looks(row: dict[str, Any], price: float | None, now: dt.datetime, ai_last: dt.datetime | None,
+                  rules: dict[str, Any], next_session: str | None, *, interval_minutes: int = 15,
+                  pip: float = 0.01) -> list[str]:
+    """この建玉を、次に AI が見るきっかけ（見張り役の線と同じ）。早い・近い順ではなく、きっかけの種類ごとに並べる。"""
+    looks = []
+    due = (ai_last + dt.timedelta(minutes=interval_minutes)) if ai_last else now
+    looks.append(f"定期: {max(due, now).astimezone(JST):%H:%M} ごろ（15分ごと）")
+    near = float(rules.get("near_pips", 3))
+    for label, level in (("損切り", row.get("stop")), ("利確", row.get("take"))):
+        if level is None or price is None:
+            continue
+        line = level + near * pip if price > level else level - near * pip
+        looks.append(f"{label}の手前: {line:.3f} に{'下がった' if price > level else '上がった'}ら（{label} {level:.3f} の {near:g} pips 手前）")
+    looks.append(f"急変: {rules.get('window_minutes', 5)}分で ±{rules.get('move_pips', 15):g} pips 動いたら")
+    if next_session:
+        looks.append(f"時間帯の切り替わり: {next_session}")
+    return looks

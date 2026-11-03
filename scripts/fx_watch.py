@@ -56,7 +56,7 @@ class Cloud:
         self.files = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
                       for n in ("fx_live.jsonl", "ai_usage.jsonl", "fx_calendar.json")]
         self.read_only = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
-                          for n in ("ai_settings.json", "ai_models.json", "fx_positions.json")]
+                          for n in ("ai_settings.json", "ai_models.json", "fx_positions.json", "fx_notes.jsonl")]
         self.flags = [SyncedFlag(self.http, bucket, "state/KILL_fx_live", state_dir / "KILL_fx_live")]
         #: 短期売買のペーパーの記録。書くのは見張り役だけなので、起動のときだけ取ってきて、あとは上げるだけ
         #: （判断の回の pull で、まだ上げていない分を上書きしないように、他のファイルとは分ける）
@@ -176,7 +176,8 @@ def current_positions(state_dir: Path) -> list[dict]:
     except (OSError, ValueError):
         summary = []
     paper = [p for p in summary if p.get("venue") == "paper"]
-    live = [{"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take}
+    live = [{"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take,
+             "price": p.price, "side": p.side, "opened_at": p.opened_at}
             for p in book_from_events(fx_live_log.load()).values()]
     return paper + live
 
@@ -220,6 +221,7 @@ async def watch(dry_run: bool) -> None:
     positions: list[dict] = []
     last_wake: dt.datetime | None = None
     fired: set[str] = set()
+    peaks: dict[str, float] = {}
     last_beat = last_check = last_positions = 0.0
     next_periodic = time.monotonic()
     busy = False
@@ -273,7 +275,8 @@ async def watch(dry_run: bool) -> None:
                         positions = current_positions(rt.STATE)
                     if clock - last_check >= 1 and not busy:  # 条件は1秒ごと（値段は1秒に約10回届く）
                         last_check = clock
-                        reason = reason_to_wake(now, history, positions, CONFIG, last_wake=last_wake, fired_sessions=fired)
+                        reason = reason_to_wake(now, history, positions, CONFIG, last_wake=last_wake, fired_sessions=fired,
+                                                peaks=peaks)
                         if reason:
                             last_wake = now
                             if trades:
@@ -286,7 +289,7 @@ async def watch(dry_run: bool) -> None:
                     if cloud and clock - last_beat >= 60:
                         last_beat = clock
                         state["watch"] = watch_snapshot(now, history, positions, CONFIG, last_wake=last_wake,
-                                                        fired_sessions=fired)
+                                                        fired_sessions=fired, peaks=peaks)
                         state["next_periodic_at"] = (now + dt.timedelta(seconds=max(0.0, next_periodic - clock))
                                                      ).isoformat(timespec="seconds") if trades else None
                         scalp.refresh_calendar(rt.CALENDAR)

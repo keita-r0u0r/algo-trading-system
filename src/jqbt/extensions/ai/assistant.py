@@ -45,8 +45,7 @@ SYSTEM = """あなたは、個人が使う売買ルールの検証と少額運�
 - これまでの検証では、優位性があると言える売買ルールは見つかっていない
 
 答え方:
-- reasoning・risks・exit_condition は必ず日本語で、平易に書く（経済指標の名前が英語でも、文章は日本語。
-  指標名は「米雇用統計（Non-Farm Employment Change）」のように日本語を添える）、結論から書く
+- 日本語で、平易に、結論から書く
 - 渡されたデータに無いことは推測で埋めない。分からないことは分からないと書く
 - 投資の推奨はしない。数字の読み方と、確かめるべきことを示す
 - 一見良い成績には、まずバグ・先読み・偶然・コスト前提を疑う"""
@@ -54,7 +53,7 @@ SYSTEM = """あなたは、個人が使う売買ルールの検証と少額運�
 #: E（FX の判断）だけの前提。検証向けの SYSTEM は「優位性は無い」「良い成績は疑う」と慎重なので、
 #: 判断がいつも見送りに寄った（2026-10-21 の記録で4回とも hold）。判断役には、枠の中で機会を探す役目を与える。
 #: 文面を変えたら FX_PROMPT_VERSION を上げる（記録を版ごとに分けて比べるため）
-FX_PROMPT_VERSION = "fx-v7"
+FX_PROMPT_VERSION = "fx-v8"
 FX_SYSTEM = """あなたは、個人の FX の自動売買で売買を判断する役です。口座は、実際のお金の口座（goal が書いてある）か、
 ペーパー運用（仮想の約定）のどちらか。判断は、定期（15分ごと）と、値段の見張り役が急変などで起こしたとき
 （market.wake_reason に理由が書いてある）に来ます。
@@ -73,21 +72,30 @@ FX_SYSTEM = """あなたは、個人の FX の自動売買で売買を判断す�
 - market.economic_calendar に、この先と直前の経済指標の発表（時刻・重要度・予想・前回）がある。
   重要な発表の直前は値段が飛びやすく、損切りが滑りやすい。発表直後の急な動きは、発表による動きとして扱う
   （見張り役が急変で起こしたときは、その時刻に発表があったかを確かめる）。発表を理由にするときは、どの発表かを書く
+- user_notes があれば、口座の持ち主（利用者）が画面から残した指示・メモ。枠と損切りの範囲で必ず尊重し、
+  それに沿ったか（沿えなかったならなぜか）を reasoning に書く
 - あなたの学習データに含まれる期間の値動きの知識は使わない
 - 根拠は、どのデータのどの動きを見たかが分かるように書く（あとで値動きと照らし合わせて振り返る）
 
 建てるとき（open_long / open_short）:
 - 何を見て建てるか（reasoning）に加えて、どうなったら閉じるか（exit_condition）と、どれくらい持つつもりか
   （hold_minutes）を必ず決める。exit_condition は、あとで値段と照らして当てはまるか判断できる具体的な形で書く
-  （例:「1時間足の終値が 157.80 を下回ったら」「ニューヨークの時間帯（22:00）までに 158.10 に届かなければ」）
+  （例:「1時間足の終値が 157.80 を下回ったら」「ニューヨークの時間帯（22:00）までに 158.10 に届かなければ」）。
+  「損切り・利確に届いたら」だけでは閉じる条件にならない（それは注文が自動でやる）。根拠が崩れたと分かる値動きを書く
 
-建玉を持っているとき:
-- account.position.plan_when_opened に、建てたときの自分の計画（根拠・閉じる条件・保有の目安・経過した分）がある
-- 閉じる（close）のは、閉じる条件に当てはまったとき、建てた根拠がはっきり崩れたとき、保有の目安を大きく過ぎても
-  動かないときだけ。少し逆に動いた・方向感がない・様子見したい、は閉じる理由にしない（損切り・利確に任せる）。
-  建ててすぐ閉じると、毎回コスト（往復約1 pip）だけを払うことになる
-- 閉じるなら、計画のどれに当てはまったかを reasoning に書く。持ち続けるなら、計画がまだ生きている理由を書く
-- 持っていないときは、exit_condition は空、hold_minutes は 0 でよい
+建玉を持っているとき（毎回、利益を最大にする向きで見直す）:
+- 含み損益はもう起きたこと。判断は「今この値段で、この向き・この損切り・利確で新しく建てるか」で決める
+  （would_open_now）。建てるなら持ち続け、建てないなら閉じる。含み損を取り返したい、は持ち続ける理由にしない
+- 判断の材料は、建てたときの計画（account.position.plan_when_opened: 根拠・閉じる条件・保有の目安・経過した分）と、
+  そのあとの値動き・発表。計画の根拠が今も成り立つかを、データで確かめて書く
+- 逆に動いた理由も考える。発表・上の足の流れの変化など、建てた根拠を否定する動きなら閉じる。根拠を否定しない
+  一時的な揺れなら持ち続ける（建ててすぐ閉じると、往復約1 pip のコストだけを払う）
+- 損切りに近い・含み損が増えている、は見直しのきっかけで、それだけでは閉じる理由にも持つ理由にもならない。
+  「損切りまで待つ」と「今閉じる」のどちらが期待値で得かを、残りの値幅と見込みで比べる
+- outlook に、この先（保有の目安まで）の値動きの見込みを、具体的な値段で書く
+- 閉じるなら、計画のどれに当てはまったか・何が根拠を否定したかを reasoning に書く。持ち続けるなら、根拠が
+  生きている証拠を書く
+- 持っていないときは、exit_condition は空、hold_minutes は 0、would_open_now は false、outlook は空でよい
 
 答え方:
 - reasoning・risks・exit_condition は必ず日本語で、平易に書く（経済指標の名前が英語でも、文章は日本語。
@@ -203,9 +211,11 @@ FX_DECISION_SCHEMA: dict[str, Any] = {
         "risks": {"type": "string"},
         "exit_condition": {"type": "string"},
         "hold_minutes": {"type": "number"},
+        "would_open_now": {"type": "boolean"},
+        "outlook": {"type": "string"},
     },
     "required": ["action", "symbol", "risk_fraction", "stop_pips", "take_pips", "confidence", "horizon",
-                 "reasoning", "risks", "exit_condition", "hold_minutes"],
+                 "reasoning", "risks", "exit_condition", "hold_minutes", "would_open_now", "outlook"],
     "additionalProperties": False,
 }
 
@@ -462,9 +472,10 @@ class AiAssistant:
 
     # E ---------------------------------------------------------------
     def fx_decide(self, context: dict[str, Any], today: dt.date) -> ModelReply:
-        """FX のペーパー運用で、次の1時間の判断を1つ出す。枠の確認は呼び出し側（core.fx.frame）で行う。"""
+        """FX の判断を1つ出す（実際の口座かペーパー運用）。枠の確認は呼び出し側（core.fx.frame）で行う。"""
         prompt = (
-            "FX のペーパー運用（仮想の約定。実際の注文は出ない）で、今の時点の判断を1つだけ出してください。\n"
+            "FX の口座で、今の時点の判断を1つだけ出してください。<goal> があれば実際のお金の口座（注文が出る）、"
+            "無ければペーパー運用（仮想の約定）です。\n"
             "- 守る枠は <frame> のとおり。枠の外の判断は実行されず、記録だけ残る\n"
             "- open_long / open_short は新規。symbol は frame.symbols から。stop_pips は必須で範囲内\n"
             "- risk_fraction は「損切りに掛かったとき資金の何割を失ってよいか」（例 0.01 = 1%）。上限は frame.max_risk_per_trade\n"
@@ -473,9 +484,11 @@ class AiAssistant:
             "- コストは往復で約1 pip（スプレッド・手数料・ずれ）。それより十分大きい値幅を見込めないなら hold\n"
             "- hold のとき symbol は空文字、数値は 0\n"
             "- あなたの学習データに含まれる期間の値動きの知識を、判断に使わないこと。渡したデータだけで判断する\n\n"
-            f"<frame>\n{to_context(context.get('frame', {}))}\n</frame>\n\n"
+            + (f"<goal>\n{context['goal']}\n</goal>\n\n" if context.get("goal") else "")
+            + f"<frame>\n{to_context(context.get('frame', {}))}\n</frame>\n\n"
             f"<account>\n{to_context(context.get('account', {}))}\n</account>\n\n"
             f"<market>\n{to_context(context.get('market', {}))}\n</market>"
+            + (f"\n\n<user_notes>\n{to_context(context['user_notes'])}\n</user_notes>" if context.get("user_notes") else "")
         )
         return self._ask("fx", prompt, FX_DECISION_SCHEMA, today)
 
