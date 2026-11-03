@@ -8,6 +8,7 @@
   * 判断する者: 判断の回が回っているか・AI が実際に呼べているか・ロジックが判断できているか（``decider_health``）
   * 口座: 直近の照会・発注の失敗、キルスイッチ
   * ペーパー運用: 止められていないか（止めていても実際の売買には関係ないので、知らせるだけ）
+  * 経済指標の予定: 取れているか（1時間ごとに取り直す。取れなくても売買は止めないので、注意にとどめる）
 
 市場が閉まっている間（土曜 7:00〜月曜 7:00）は、動いていないのが正しいので、止まっているとは言わない。
 """
@@ -27,6 +28,8 @@ TICK_STALE_MINUTES = 3
 #: 値段が途切れてもこの分数までは、作り直し（反映）や一時的な切断として「注意」にとどめる。超えたら異常
 TICK_DOWN_MINUTES = 10
 ERROR_WINDOW = dt.timedelta(hours=1)
+#: 経済指標の予定は1時間ごとに取り直す。3時間を超えて新しくならなければ、取れていない
+CALENDAR_STALE = dt.timedelta(hours=3)
 
 
 @dataclass(frozen=True)
@@ -93,7 +96,8 @@ def decider_health(events: Sequence[dict[str, Any]], name: str, now: dt.datetime
 
 
 def check_all(now: dt.datetime, *, watch: dict[str, Any], live_events: Sequence[dict[str, Any]],
-              accounts: Sequence[str], live_enabled: bool, killed: bool, paper_paused: bool) -> list[Finding]:
+              accounts: Sequence[str], live_enabled: bool, killed: bool, paper_paused: bool,
+              calendar: dict[str, Any] | None = None) -> list[Finding]:
     """全部の確認。悪い順（bad → warn → info → ok）に並べて返す。"""
     is_open = market_open(now)
     findings: list[Finding] = []
@@ -168,6 +172,16 @@ def check_all(now: dt.datetime, *, watch: dict[str, Any], live_events: Sequence[
         findings.append(Finding("口座", "warn", f"直近1時間に{len(errors)}回エラー（最後: {text}）",
                                 "その回は照会・発注ができなかった。次の回でやり直す", "続くようなら Claude に伝える"))
 
+    if calendar is not None and is_open:
+        fetched = _at(calendar.get("fetched_at"))
+        if fetched is None or now - fetched > CALENDAR_STALE:
+            since = f"{fetched:%m-%d %H:%M} から" if fetched else "一度も"
+            findings.append(Finding("経済指標の予定", "warn",
+                                    f"{since}取れていない（{calendar.get('error') or 'まだ取りに行っていない'}）",
+                                    "AI が発表の予定を知らずに判断する。短期売買（ペーパー）は発表の前後でも建てる。売買そのものは止まらない",
+                                    "しばらく待っても直らなければ Claude に「経済指標の予定が取れていない」と伝える"))
+        else:
+            findings.append(Finding("経済指標の予定", "ok", f"取れている（{fetched:%H:%M} に取得）"))
     if paper_paused:
         findings.append(Finding("ペーパー運用", "info", "止めている", "実際の売買には関係ない",
                                 "比べたいなら「操作」の画面で再開する"))

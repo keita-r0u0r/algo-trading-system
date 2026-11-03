@@ -20,6 +20,7 @@ from pathlib import Path
 import httpx
 import pandas as pd
 
+from ..application import fx_calendar
 from ..application.fx_live_trade import Intent, LiveConfig, book_from_events
 from ..application.fx_paper import (
     PaperAccount,
@@ -32,7 +33,7 @@ from ..application.fx_paper import (
 )
 from ..core.fx.frame import TradingFrame, check
 from ..core.fx.model import RISK_PROFILES, SWAP_MARKUP, FxCosts, FxInstrument, swap_per_unit
-from ..infrastructure import fx_live_log, fx_paper_log, rates
+from ..infrastructure import econ_calendar, fx_live_log, fx_paper_log, rates
 from ..infrastructure.gmo_fx import GmoFxClient
 from ..infrastructure.gmo_fx_store import fetch_day, to_engine
 from .fx_live import LiveSession, sync
@@ -307,6 +308,8 @@ class Context:
     ai_due: bool = True
     #: この回の前に、最後に AI を呼んだ時刻（呼ばない理由を記録に残すため）
     ai_last: dt.datetime | None = None
+    #: 経済指標の予定（application/fx_calendar.py。取れなければ空）
+    calendar: list = field(default_factory=list)
 
 
 def frame_for(name: str, ctx: Context) -> TradingFrame:
@@ -340,6 +343,11 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *
             context["frame"]["max_units"] = LiveConfig().max_units
             context["goal"] = ("実際の口座。利用者の目標は1か月で資金1.5倍。数量は risk_fraction（枠の上限まで）で決まる。"
                                "根拠が強いときは大きく、弱いときは小さく、無いときは hold。枠と損切りは必ず守る")
+        context["market"]["economic_calendar"] = {
+            "events": fx_calendar.upcoming(ctx.calendar, now, frame.symbols),
+            "note": "この先12時間・直前2時間の、通貨ペアに関係する経済指標の発表（重要度は中以上。時刻は日本時間。"
+                    "minutes_from_now が負なら発表済み）。予定が取れなかったときは空",
+        }
         if ctx.trigger:
             context["market"]["wake_reason"] = f"見張り役がこの回を起こした理由: {ctx.trigger}"
         try:
@@ -442,7 +450,19 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
     return Context(api=api, now=now, frame=frame, carry_frame=carry_frame, live_frame=live_frame, insts=insts, quotes=quotes, bars=bars,
                    ai=ai, today_rates=rates_summary(now.date()) if ai is not None else {},
                    short=short_rates(now.date()), ai_cache={}, trigger=trigger,
-                   ai_last=ai_last_called(), ai_due=ai_due(trigger))  # 前回の時刻は、ai_due が書き換える前に読む
+                   ai_last=ai_last_called(), ai_due=ai_due(trigger), calendar=load_calendar(now))  # 前回の時刻は、ai_due が書き換える前に読む
+
+
+CALENDAR = STATE / "fx_calendar.json"
+
+
+def load_calendar(now: dt.datetime) -> list:
+    """経済指標の予定（1時間ごとに取り直す）。取れなくても空で進める。"""
+    try:
+        return fx_calendar.parse(econ_calendar.load(CALENDAR, now).get("events") or [])
+    except Exception as exc:  # noqa: BLE001  予定が無くても判断は止めない
+        print(f"経済指標の予定を読めなかった: {type(exc).__name__}: {exc}", flush=True)
+        return []
 
 
 def run_paper(ctx: "Context", accounts: dict[str, PaperAccount], events: list[dict]) -> list[dict]:
