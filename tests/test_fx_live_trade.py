@@ -49,6 +49,13 @@ def test_open_is_capped_to_max_units():
     assert isinstance(action, Open) and action.size == 1_000
 
 
+def test_harness_is_capped_smaller_while_compared():
+    big = Intent(**{**OPEN_AI.__dict__, "account": "harness", "units": 666.0})
+    [action] = run_plan([big], available=100_000.0)
+    assert isinstance(action, Open) and action.size == 300 and action.account == "harness"
+    assert ON.units_cap("ai") == 1_000
+
+
 def test_open_shrinks_to_available_margin():
     big = Intent(**{**OPEN_AI.__dict__, "units": 1_000.0})
     [action] = run_plan([big], available=5_000.0)  # 158円 ÷ 20倍 × 1.2 = 9.48円/通貨 → 527通貨

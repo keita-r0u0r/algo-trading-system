@@ -16,7 +16,7 @@
 ## 安全装置（どれか1つでも当てはまれば、新しく建てない。決済はいつでも通す）
 
   * 有効にしていない（``enabled``）、キルスイッチが入っている
-  * 1口座の数量は ``max_units`` まで。まねる口座で、すでに建玉を持っている
+  * 1口座の数量は ``max_units`` まで（口座ごとに小さくできる: ``max_units_by_account``）。まねる口座で、すでに建玉を持っている
   * 取引余力が、必要な証拠金の ``margin_buffer`` 倍に足りない分は数量を減らす。最小の注文数量に届かなければ建てない
   * ``daily_loss_limit`` を決めたときだけ、その日の初めから評価額がその割合だけ減ったら建てない（既定は使わない）
 
@@ -38,9 +38,11 @@ from typing import Any
 class LiveConfig:
     enabled: bool = False
     #: まねる口座（ペーパー運用の口座の名前）
-    accounts: tuple[str, ...] = ("ai", "carry_trend_USD_JPY")
+    accounts: tuple[str, ...] = ("ai", "carry_trend_USD_JPY", "harness")
     #: 1口座あたりの数量の上限（通貨）。判断する者が状況に応じて決めた数量を、ここで切る（利用者が決めた: 1,000）
     max_units: int = 1_000
+    #: 口座ごとの上限（``max_units`` より小さくする口座だけ）。新しい作り（harness）は、比べるあいだ小さく動かす
+    max_units_by_account: tuple[tuple[str, int], ...] = (("harness", 300),)
     #: 最小の注文数量（GMOコインは各通貨ペア100通貨）
     min_units: int = 100
     #: その日の初めから評価額がこの割合だけ減ったら、その日は新しく建てない。None なら使わない（既定。
@@ -52,6 +54,9 @@ class LiveConfig:
     #: 取引余力が、必要な証拠金（新規は20倍）のこの倍数に足りない分は数量を減らす
     margin_buffer: float = 1.2
     leverage_for_entry: float = 20.0
+
+    def units_cap(self, account: str) -> int:
+        return min(self.max_units, dict(self.max_units_by_account).get(account, self.max_units))
 
 
 @dataclass(frozen=True)
@@ -167,7 +172,7 @@ def plan(
             continue
         if intent.action != "open":
             continue
-        size = min(int(abs(intent.units)), config.max_units, _affordable(intent.symbol, available, config, prices))
+        size = min(int(abs(intent.units)), config.units_cap(account), _affordable(intent.symbol, available, config, prices))
         reason = _blocked(account, intent.symbol, size, book, config, killed, equity, day_start_equity, available, prices)
         if not reason and not intent.stop_pips:
             reason = "損切りの無い判断は、実際の口座では建てない"

@@ -169,3 +169,47 @@ def test_monthly_ai_cost():
             {"kind": "rating", "at": "2026-11-02T01:00:00+00:00"}]
     c = vm.monthly_ai_cost(recs, dt.datetime(2026, 11, 3, 0, 0, tzinfo=jst))
     assert abs(c["spent"] - 0.1) < 1e-9 and c["projected"] > c["spent"]
+
+
+def _trade_events():
+    return [
+        {"kind": "live_open", "account": "harness", "position_id": 1, "symbol": "USD_JPY", "side": "BUY", "at": "2026-11-04T09:00:00+09:00"},
+        {"kind": "snapshot", "positions": [{"positionId": 1, "lossGain": "60"}]},
+        {"kind": "execution", "settleType": "CLOSE", "positionId": 1, "lossGain": "45"},
+        {"kind": "live_open", "account": "harness", "position_id": 2, "symbol": "GBP_JPY", "side": "SELL", "at": "2026-11-04T11:00:00+09:00"},
+        {"kind": "execution", "settleType": "CLOSE", "positionId": 2, "lossGain": "-30"},
+        {"kind": "live_open", "account": "ai", "position_id": 3, "symbol": "USD_JPY", "side": "BUY", "at": "x"},
+        {"kind": "execution", "settleType": "CLOSE", "positionId": 3, "lossGain": "-99"},
+    ]
+
+
+def test_decider_scorecard_puts_payoff_and_kept_profit_first():
+    from jqbt.interfaces import viewmodels as vm
+
+    c = vm.decider_scorecard(_trade_events(), "harness")
+    assert c["trades"] == 2 and c["total"] == 15.0 and c["win_rate"] == 0.5
+    assert c["avg_win"] == 45.0 and c["avg_loss"] == -30.0 and c["payoff"] == 1.5
+    assert c["peaked"] == 1 and c["kept_of_peak"] == 0.75
+    assert vm.decider_scorecard([], "harness")["payoff"] is None
+
+
+def test_filter_shadow_rows_pair_the_answer_with_the_result():
+    from jqbt.interfaces import viewmodels as vm
+
+    events = _trade_events() + [{"kind": "live_decision", "account": "harness", "approved": True,
+                                 "at": "2026-11-04T09:00:00+09:00",
+                                 "decision": {"action": "open_long", "symbol": "USD_JPY"},
+                                 "logic": {"filter": {"provider": "jev", "skip_probability": 0.2, "veto": False}}}]
+    rows = vm.filter_shadow_rows(events)
+    assert rows[0]["skip_probability"] == 0.2 and rows[0]["said_skip"] is False and rows[0]["pnl"] == 45.0
+    assert rows[1]["provider"] is None and rows[1]["pnl"] == -30.0
+
+
+def test_harness_reason_reads_the_evidence():
+    from jqbt.interfaces import viewmodels as vm
+
+    e = {"account": "harness", "decision": {"action": "hold"},
+         "logic": {"evidence": {"USD_JPY": ["上向きの流れ", "押していない"]}}}
+    assert vm.explain_decision(e) == "建てない。ドル円: 押していない"
+    e = {"account": "harness", "decision": {"action": "hold"}, "logic": {"evidence": ["含み損益 +3.0 pips"]}}
+    assert vm.explain_decision(e).startswith("持ち続ける")

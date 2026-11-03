@@ -215,6 +215,16 @@ DECISION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+#: 機械の決まりの候補を、見送るかだけ答える
+FX_EXIT_METHODS = ["target", "breakeven", "percent_peak", "chandelier", "structure"]
+FX_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"skip": {"type": "boolean"}, "reason": {"type": "string"},
+                   "exit_method": {"type": "string", "enum": FX_EXIT_METHODS}, "exit_reason": {"type": "string"}},
+    "required": ["skip", "reason", "exit_method", "exit_reason"],
+    "additionalProperties": False,
+}
+
 #: E: FX のペーパー運用の判断。決まった枠の中で、通貨ペア・向き・リスク・損切り・利確を自由に決める
 FX_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -514,6 +524,22 @@ class AiAssistant:
             + (f"\n\n<user_notes>\n{to_context(context['user_notes'])}\n</user_notes>" if context.get("user_notes") else "")
         )
         return self._ask("fx", prompt, FX_DECISION_SCHEMA, today)
+
+    def fx_review(self, state: dict[str, Any], today: dt.date) -> ModelReply:
+        """機械の決まりが出した候補を、見送るかだけ答える（向き・数量・損切りは変えられない）。"""
+        prompt = (
+            "機械の決まり（流れの中の押し目）が、次の取引の候補を出しました。あなたは見送るかどうかだけを答えます。"
+            "向き・数量・損切り・利確は変えられません。\n"
+            "- 見送るのは、はっきりした理由があるときだけ: 重要な経済指標の発表が近い・直後、"
+            "取引と逆側の大きな節目（今日・前日の高値安値、キリの良い値段）が目標までの途中にすぐある、"
+            "材料が取引の向きと食い違っている、利用者のメモが止めている\n"
+            "- 「買われすぎ」「売られすぎ」だけを理由に見送らない（流れの中の RSI の高止まりは勢いの印）\n"
+            "- reason は日本語で、見た数字を挙げて1〜2文\n"
+            "- exit_method は、建てたあとの決済の手法を <state> の exit_methods から1つ選ぶ。目標は勝率ではなく、"
+            "1回の勝ちを大きくすること（流れの強さ・揺れの大きさ・この先の指標で選ぶ）。exit_reason に理由を日本語で1文\n\n"
+            f"<state>\n{to_context(state)}\n</state>"
+        )
+        return self._ask("fx", prompt, FX_REVIEW_SCHEMA, today)
 
     # D ---------------------------------------------------------------
     def decide(

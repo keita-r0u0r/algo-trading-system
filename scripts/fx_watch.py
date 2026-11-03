@@ -54,9 +54,9 @@ class Cloud:
         bucket = os.environ["STATE_BUCKET"]
         self.bucket = bucket
         self.files = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
-                      for n in ("fx_live.jsonl", "ai_usage.jsonl", "fx_calendar.json")]
+                      for n in ("fx_live.jsonl", "ai_usage.jsonl", "fx_calendar.json", "jev_usage.jsonl")]
         self.read_only = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
-                          for n in ("ai_settings.json", "ai_models.json", "fx_positions.json", "fx_notes.jsonl")]
+                          for n in ("ai_settings.json", "ai_models.json", "fx_positions.json", "fx_notes.jsonl", "fx_settings.json")]
         self.flags = [SyncedFlag(self.http, bucket, "state/KILL_fx_live", state_dir / "KILL_fx_live")]
         #: 短期売買のペーパーの記録。書くのは見張り役だけなので、起動のときだけ取ってきて、あとは上げるだけ
         #: （判断の回の pull で、まだ上げていない分を上書きしないように、他のファイルとは分ける）

@@ -129,3 +129,119 @@ def test_active_notes_respects_expiry_and_delete(tmp_path):
             {"kind": "delete", "id": "c"}]
     path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
     assert [n["text"] for n in active_notes(now, path)] == ["建てない"]
+
+
+def test_ai_is_not_woken_for_rules_managed_positions(state):
+    assert rt.ai_due("")
+    assert not rt.ai_due("決まりの決済の線: harness の建玉が利益を守る線（158.1）を割った")
+    assert rt.ai_due("見直し: ai の建玉の含み損が損切りまでの33%に達した")
+
+
+def test_settings_round_trip(tmp_path):
+    from jqbt.application.fx_filter import FilterSettings, FxSettings
+
+    path = tmp_path / "fx_settings.json"
+    assert rt.load_settings(path).enabled("harness")  # 無ければ既定
+    rt.save_settings(FxSettings({"ai": False, "harness": True}, FilterSettings(mode="veto", provider="gemini")), path)
+    loaded = rt.load_settings(path)
+    assert not loaded.enabled("ai") and loaded.filter.mode == "veto" and loaded.filter.provider == "gemini"
+
+
+def harness_ctx(features, quotes=None, bars=None, settings=None, jev=None):
+    from jqbt.application.fx_filter import FxSettings
+    from jqbt.core.fx.frame import TradingFrame
+    from jqbt.core.fx.model import RISK_PROFILES
+
+    now = dt.datetime(2026, 11, 4, 10, 0, tzinfo=JST)
+    return rt.Context(api=None, now=now, frame=None, carry_frame=None, live_frame=TradingFrame(symbols=tuple(features), risk=RISK_PROFILES["live"]),
+                      insts={}, quotes=quotes or {}, bars=bars or {s: None for s in features}, ai=None, today_rates={},
+                      short={}, settings=settings or FxSettings(), jev=jev, features=dict(features))
+
+
+def test_harness_opens_on_rules_and_asks_jev_only_to_skip(tmp_path, monkeypatch):
+    from test_fx_setups import features
+
+    from jqbt.application.fx_filter import FilterSettings, FxSettings
+    from jqbt.application.fx_paper import PaperAccount
+
+    monkeypatch.setattr(rt, "JEV_USAGE", tmp_path / "jev.jsonl")
+    monkeypatch.setattr(rt, "NOTES", tmp_path / "notes.jsonl")
+
+    class Jev:
+        def __init__(self, skip):
+            self.skip, self.asked = skip, []
+
+        def ask(self, state, questions):
+            self.asked.append((state, questions))
+            return {"model": "jev-1", "answers": {"skip": {"noul": self.skip}, "quality": {"score": 2, "confidence": .5}},
+                    "usage": {"input_tokens": 900}}
+
+    empty = PaperAccount("harness", 10000, 10000, None, equity=10000, day_start_equity=10000)
+    jev = Jev(0.9)
+    d, reason, extra = rt.harness_decision(empty, harness_ctx({"USD_JPY": features()}, jev=jev), [])
+    assert d["action"] == "open_long" and d["stop_pips"] == 16.0 and reason.startswith("決まり")
+    assert d["exit_method"] == "chandelier" and extra["logic"]["exit_choice"]["by"] == "jev"  # 答えに無ければ決まった手法
+    assert "記録だけ" in extra["note"] and extra["logic"]["filter"]["skip_probability"] == 0.9  # 既定は記録だけ
+    assert jev.asked[0][0]["proposed_trade"]["symbol"] == "USD_JPY"
+    assert (tmp_path / "jev.jsonl").exists()
+    veto = FxSettings(filter=FilterSettings(mode="veto"))
+    d, _, extra = rt.harness_decision(empty, harness_ctx({"USD_JPY": features()}, settings=veto, jev=Jev(0.9)), [])
+    assert d["action"] == "hold" and "見送り" in extra["note"]
+    d, _, _ = rt.harness_decision(empty, harness_ctx({"USD_JPY": features()}, settings=veto, jev=None), [])
+    assert d["action"] == "open_long"  # キーが無ければ決まりのとおり
+
+
+def test_harness_closes_by_its_exit_method():
+    import pandas as pd
+    from test_fx_setups import features
+
+    from jqbt.application.fx_paper import PaperAccount, PaperPosition
+
+    idx = pd.date_range("2026-11-04 09:00", periods=60, freq="1min")
+    bars = pd.DataFrame({"high": [158.0] * 30 + [158.40] + [158.1] * 29, "low": [157.95] * 60}, index=idx)
+    p = PaperPosition("USD_JPY", 300, 158.0, 157.84, None, "2026-11-04T09:00:00+09:00")
+    account = PaperAccount("harness", 10000, 10000, p, equity=10000, day_start_equity=10000)
+    ctx = harness_ctx({"USD_JPY": features()}, quotes={"USD_JPY": {"bid": 158.08, "ask": 158.10, "spread": 2}},
+                      bars={"USD_JPY": bars})
+    d, reason, extra = rt.harness_decision(account, ctx, [])  # シャンデリア: 158.40 − 0.30 = 158.10 を割った
+    assert d["action"] == "close" and "158.1" in reason
+    assert extra["logic"]["peak_pips"] == 40.0 and extra["logic"]["exit_level"] == 158.1
+    events = [{"kind": "live_decision", "account": "harness", "approved": True, "at": "2026-11-04T08:59:00+09:00",
+               "decision": {"action": "open_long", "symbol": "USD_JPY", "exit_method": "target"}}]
+    d, _, extra = rt.harness_decision(account, ctx, events)  # 建てたときに選んだ手法（利確まで持つ）を使う
+    assert d["action"] == "hold" and extra["logic"]["exit_method"] == "target"
+
+
+def test_harness_lets_jev_pick_the_exit_method(tmp_path, monkeypatch):
+    from test_fx_setups import features
+
+    from jqbt.application.fx_filter import ExitSettings, FilterSettings, FxSettings
+    from jqbt.application.fx_paper import PaperAccount
+
+    monkeypatch.setattr(rt, "JEV_USAGE", tmp_path / "jev.jsonl")
+    monkeypatch.setattr(rt, "NOTES", tmp_path / "notes.jsonl")
+
+    class Jev:
+        def ask(self, state, questions):
+            assert set(questions) == {"exit_method"}  # 見送りは聞かない設定
+            return {"answers": {"exit_method": {"choice": "target", "confidence": 0.8}}, "usage": {}}
+
+    settings = FxSettings(filter=FilterSettings(mode="off"), exits=ExitSettings(selector="jev"))
+    empty = PaperAccount("harness", 10000, 10000, None, equity=10000, day_start_equity=10000)
+    d, _, extra = rt.harness_decision(empty, harness_ctx({"USD_JPY": features()}, settings=settings, jev=Jev()), [])
+    assert d["exit_method"] == "target" and d["take_pips"] == 48.0
+    assert extra["logic"]["exit_choice"] == {"by": "jev", "method": "target", "confidence": 0.8, "probabilities": None}
+    d, _, extra = rt.harness_decision(empty, harness_ctx({"USD_JPY": features()}, settings=settings, jev=None), [])
+    assert d["exit_method"] == "chandelier" and "error" in extra["logic"]["exit_choice"]  # 聞けなければ決まった手法
+
+
+def test_live_watch_rows_mark_harness_as_rules_managed():
+    events = [
+        {"kind": "live_open", "account": "harness", "symbol": "USD_JPY", "side": "BUY", "size": 300, "position_id": 9,
+         "price": 158.0, "at": "2026-11-04T09:00:00+09:00"},
+        {"kind": "live_protect", "account": "harness", "position_id": 9, "stop": 157.84, "take": 158.32},
+        {"kind": "live_decision", "account": "harness", "at": "2026-11-04T09:30:00+09:00", "decision": {"action": "hold"},
+         "logic": {"exit_level": 158.1}},
+    ]
+    [row] = rt.live_watch_rows(events)
+    assert row["managed"] == "rules" and row["exit_level"] == 158.1

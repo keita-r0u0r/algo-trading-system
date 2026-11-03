@@ -617,7 +617,8 @@ def fx_live_controls() -> None:
             (pill("注文を出す設定", "ok") if enabled else pill("注文を出さない設定（記録だけ）", "info")) + " " +
             (pill("キルスイッチ: 入", "bad") if kill.exists() else pill("キルスイッチ: 切", "ok")),
             unsafe_allow_html=True)
-        st.caption("実際に売買する判断する者: AI・金利差＋流れ（ドル円）。実際の口座の状態を見て判断し、状況に応じた数量（1口座1,000通貨まで）で、"
+        st.caption("実際に売買する判断する者: AI・金利差＋流れ（ドル円）・ハーネス＋決まり。実際の口座の状態を見て判断し、"
+                   "状況に応じた数量（1口座1,000通貨まで。ハーネス＋決まりは比べるあいだ300通貨まで）で、"
                    "損切りは GMOコイン側に置く。ペーパー運用とは独立。注文を出す設定は infra の fx_live_enabled")
         if kill.exists():
             st.caption(kill.read_text(encoding="utf-8"))
@@ -630,7 +631,47 @@ def fx_live_controls() -> None:
             kill.parent.mkdir(parents=True, exist_ok=True)
             kill.write_text(f"{dt.datetime.now().isoformat(timespec='seconds')} 画面から止めた", encoding="utf-8")
             flash("キルスイッチを入れました。新しい注文は出しません（決済は出します）", "warning")
+    decider_settings()
     live(fx_live_trades)()
+
+
+def decider_settings() -> None:
+    """売買の作りの切り替え（AI が判断 / ハーネス＋決まり）と、決まりの候補の見送りを誰に聞くか。"""
+    from jqbt.application import fx_filter
+    from jqbt.interfaces import fx_runtime as rt
+
+    current = rt.load_settings()
+    with st.container(border=True):
+        st.markdown("**売買の作り（並べて比べる）**")
+        st.caption("OFF にした作りは新しく建てない（持っている建玉の決済は続ける）。"
+                   "ハーネス＋決まりは、建てる・閉じるを決まりが決め、Jev か AI には「見送るか」だけを聞く。"
+                   "向き・数量・損切りは変えさせない。変えると次の回（5分以内）から効く")
+        with st.form("decider_settings_form"):
+            deciders = {name: st.toggle(label, value=current.enabled(name), key=f"decider-{name}")
+                        for name, label in fx_filter.SWITCHABLE.items()}
+            c1, c2, c3 = st.columns(3)
+            mode = c1.selectbox("見送りの確認", list(fx_filter.MODES), index=list(fx_filter.MODES).index(current.filter.mode),
+                                format_func=fx_filter.MODES.get)
+            provider = c2.selectbox("聞く相手", list(fx_filter.PROVIDERS),
+                                    index=list(fx_filter.PROVIDERS).index(current.filter.provider),
+                                    format_func=fx_filter.PROVIDERS.get)
+            threshold = c3.slider("見送る確からしさ（Jev）", 0.3, 0.9, float(current.filter.threshold), 0.05)
+            d1, d2 = st.columns(2)
+            selector = d1.selectbox("決済の手法を選ぶのは", list(fx_filter.EXIT_SELECTORS),
+                                    index=list(fx_filter.EXIT_SELECTORS).index(current.exits.selector),
+                                    format_func=fx_filter.EXIT_SELECTORS.get)
+            method = d2.selectbox("決まった手法（選べなかったときも、これを使う）", list(fx_filter.EXIT_METHODS),
+                                  index=list(fx_filter.EXIT_METHODS).index(current.exits.method),
+                                  format_func=lambda m: f"{m}: {fx_filter.EXIT_METHODS[m]}")
+            if st.form_submit_button("保存", type="primary"):
+                rt.save_settings(fx_filter.FxSettings(
+                    deciders, fx_filter.FilterSettings(mode, provider, threshold),
+                    dt.datetime.now(JST).isoformat(timespec="seconds"), fx_filter.ExitSettings(selector, method)))
+                flash("売買の作りの設定を保存しました。次の回から効きます")
+                st.rerun()
+        if current.updated_at:
+            st.caption(f"最後に変えた時刻: {current.updated_at[5:16].replace('T', ' ')}。"
+                       "Jev は1回 約 $0.0001、AI（Gemini）は1回 約 $0.003")
 
 
 def fx_live_trades() -> None:
@@ -1081,7 +1122,11 @@ def live_overview() -> None:
                 "動き": {"ok": "🟢 ", "warn": "🟡 ", "bad": "🔴 "}.get(health["state"], "⚪ ") + health["text"],
                 "最後の判断": (e.get("at", "")[5:16].replace("T", " ") + " " + vm.action_label(d, holding)) if e else "—",
                 "理由": vm.explain_decision(e, holding) if e else "",
-                "見た数字": ", ".join(f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")),
+                "見た数字": "" if e.get("account") == "harness" else
+        ", ".join(f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")),
+        "決済の手法": (e.get("decision") or {}).get("exit_method") or (e.get("logic") or {}).get("exit_method") or "",
+        "見送りの確認": ((e.get("logic") or {}).get("filter") or {}).get("text")
+        or ((e.get("logic") or {}).get("filter") or {}).get("error") or "",
                 "建玉": f"{held['通貨']} {held['売買']} {held['数量']:.0f}（{held['含み損益']:+,} 円）" if held else "なし",
             })
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
@@ -1257,7 +1302,11 @@ def live_decisions() -> None:
     with st.expander("ロジックの決まり（機械の判断）"):
         from jqbt.interfaces.fx_runtime import RULES, RULES_VERSION
 
-        st.caption(f"版: {RULES_VERSION}")
+        from jqbt.application.fx_setups import HARNESS_VERSION
+        from jqbt.interfaces.fx_runtime import HARNESS
+
+        st.caption(f"版: {RULES_VERSION}・{HARNESS_VERSION}")
+        st.markdown(f"- **{vm.account_label('harness')}**: {HARNESS.describe()}")
         for key, text in RULES.items():
             st.markdown(f"- **{vm.account_label(key) if key != 'carry_trend' else '金利差＋流れ'}**: {text}")
 
@@ -1295,6 +1344,31 @@ def compare_body() -> None:
         "実運用の損益": st.column_config.NumberColumn(format="%+d 円")})
     st.caption("実運用はペーパーと数量（1口座1,000通貨まで）と約定の値段が違うので、損益の大きさは揃いません。"
                "実運用の損益は、決済した分の確定損益（手数料・スワップ込み）と、持っている建玉の含み損益の合計")
+    st.markdown("**実運用の成績（勝ちの大きさを先に見る）**")
+    cards_rows = []
+    for name in LiveConfig().accounts:
+        c = vm.decider_scorecard(events, name)
+        cards_rows.append({"判断する者": vm.account_label(name), "決済": c["trades"], "合計": c["total"],
+                           "平均の勝ち": c["avg_win"], "平均の負け": c["avg_loss"],
+                           "勝ち÷負け": c["payoff"], "勝率": f"{c['win_rate']:.0%}" if c["win_rate"] is not None else "",
+                           "乗った含み益を残せた割合": f"{c['kept_of_peak']:.0%}（{c['peaked']}回）"
+                           if c["kept_of_peak"] is not None else ""})
+    st.dataframe(pd.DataFrame(cards_rows), hide_index=True, width="stretch", column_config={
+        "合計": st.column_config.NumberColumn(format="%+.0f 円"),
+        "平均の勝ち": st.column_config.NumberColumn(format="%+.0f 円"),
+        "平均の負け": st.column_config.NumberColumn(format="%+.0f 円")})
+    st.caption("勝ち÷負けは、1回の平均の勝ちが平均の負けの何倍か。1を大きく超えるほど、勝率が低くても増える。"
+               "乗った含み益を残せた割合は、含み益が20円以上まで乗った取引で、最大の含み益のうち確定できた割合")
+    shadow = vm.filter_shadow_rows(events)
+    if shadow:
+        st.markdown("**Jev / AI の見送りの答えと、その取引の結果**（記録だけの答えも残す）")
+        st.dataframe(pd.DataFrame([{
+            "時刻": r["at"][5:16].replace("T", " "), "通貨": vm.PAIR_LABELS.get(r["symbol"], r["symbol"]),
+            "売買": r["side"], "聞いた相手": r["provider"] or "聞いていない",
+            "見送るべき確からしさ": f"{r['skip_probability']:.0%}" if r["skip_probability"] is not None else "",
+            "見送りと答えたか": "" if r["said_skip"] is None else ("見送り" if r["said_skip"] else "通す"),
+            "結果": r["pnl"], "聞けなかった理由": r["error"] or ""} for r in reversed(shadow)]),
+            hide_index=True, width="stretch", column_config={"結果": st.column_config.NumberColumn(format="%+.0f 円")})
 
 
 def page_controls() -> None:

@@ -152,6 +152,7 @@ def fx_summary_cards(summary: dict[str, Any]) -> list[dict[str, str]]:
 #: FX のペーパー運用の口座の、画面に出す名前
 ACCOUNT_LABELS = {
     "ai": "AI",
+    "harness": "ハーネス＋決まり",
     "rule_hourly_breakout": "1時間足の突破",
     "buy_and_hold": "買って持つだけ",
     "no_trade": "一切売買しない",
@@ -174,6 +175,8 @@ def account_label(name: str) -> str:
 def account_kind(name: str) -> str:
     if name == "ai":
         return "AI"
+    if name == "harness":
+        return "機械（AI・Jev は見送りだけ）"
     return "基準" if name in ("buy_and_hold", "no_trade") else "機械"
 
 
@@ -219,6 +222,8 @@ def explain_decision(e: dict[str, Any], holding: bool | None = None) -> str:
     decision = e.get("decision") or {}
     if e.get("error"):
         return f"AI を呼べなかったので、何もしなかった（{str(e['error'])[:80]}）"
+    if e.get("account") == "harness":
+        return harness_reason(e)
     if e.get("note"):
         note = str(e["note"])
         if note.startswith("AI を呼ぶ回ではない（"):  # 理由を記録する前の版
@@ -262,6 +267,71 @@ def explain_decision(e: dict[str, Any], holding: bool | None = None) -> str:
     if account == "no_trade":
         return "一切売買しない（比べる基準）"
     return ""
+
+
+def harness_reason(e: dict[str, Any]) -> str:
+    """ハーネス＋決まりの判断を、見た数字つきの文で（建てた・閉じた理由、持っている間の線、建てなかった理由）。"""
+    decision, logic = e.get("decision") or {}, e.get("logic") or {}
+    note = f"（{e['note']}）" if e.get("note") else ""
+    if decision.get("reasoning"):
+        return str(decision["reasoning"]) + note
+    evidence = logic.get("evidence")
+    if isinstance(evidence, list):  # 持っている間
+        return "持ち続ける: " + " / ".join(evidence)
+    if isinstance(evidence, dict):  # 建てる候補を探した
+        parts = [f"{PAIR_LABELS.get(sym, sym)}: {why[-1]}" for sym, why in evidence.items() if why]
+        return ("建てない" + note + "。" if note else "建てない。") + " / ".join(parts)
+    return str(e.get("note") or "")
+
+
+def decider_scorecard(events: Sequence[dict[str, Any]], account: str) -> dict[str, Any]:
+    """判断する者の実際の成績。勝率より、1回の勝ちの大きさと、乗った含み益をどれだけ残せたかを先に見る。"""
+    opens = {int(e["position_id"]): e for e in events
+             if e.get("kind") == "live_open" and e.get("account") == account and e.get("position_id")}
+    pnl: dict[int, float] = {}
+    best: dict[int, float] = {}
+    for e in events:
+        if e.get("kind") == "execution" and e.get("settleType") == "CLOSE" and int(e.get("positionId") or 0) in opens:
+            pid = int(e["positionId"])
+            pnl[pid] = pnl.get(pid, 0.0) + float(e.get("lossGain") or 0)
+        elif e.get("kind") == "snapshot":
+            for p in e.get("positions") or []:
+                pid = int(p.get("positionId") or 0)
+                if pid in opens:
+                    best[pid] = max(best.get(pid, 0.0), float(p.get("lossGain") or 0))
+    results = [pnl[pid] for pid in opens if pid in pnl]
+    wins, losses = [x for x in results if x > 0], [x for x in results if x <= 0]
+    peaked = [pid for pid in opens if pid in pnl and best.get(pid, 0) >= 20]
+    avg_win = sum(wins) / len(wins) if wins else None
+    avg_loss = sum(losses) / len(losses) if losses else None
+    return {"trades": len(results), "total": round(sum(results), 1),
+            "win_rate": len(wins) / len(results) if results else None,
+            "avg_win": round(avg_win, 1) if avg_win is not None else None,
+            "avg_loss": round(avg_loss, 1) if avg_loss is not None else None,
+            "payoff": round(avg_win / -avg_loss, 2) if avg_win and avg_loss else None,
+            "peaked": len(peaked),
+            "kept_of_peak": (round(sum(pnl[p] for p in peaked) / sum(best[p] for p in peaked), 2) if peaked else None)}
+
+
+def filter_shadow_rows(events: Sequence[dict[str, Any]], account: str = "harness") -> list[dict[str, Any]]:
+    """決まりが建てた取引ごとの、Jev / AI の見送りの答えと、その取引の結果（記録だけの答えを後で比べる）。"""
+    opens = [e for e in events if e.get("kind") == "live_open" and e.get("account") == account]
+    pnl: dict[int, float] = {}
+    for e in events:
+        if e.get("kind") == "execution" and e.get("settleType") == "CLOSE" and e.get("positionId") is not None:
+            pnl[int(e["positionId"])] = pnl.get(int(e["positionId"]), 0.0) + float(e.get("lossGain") or 0)
+    decisions = [e for e in events if e.get("kind") == "live_decision" and e.get("account") == account
+                 and str((e.get("decision") or {}).get("action", "")).startswith("open") and e.get("approved")]
+    rows = []
+    for o in opens:
+        d = next((x for x in reversed(decisions) if x.get("at", "") <= o.get("at", "")
+                  and (x.get("decision") or {}).get("symbol") == o.get("symbol")), None)
+        f = ((d or {}).get("logic") or {}).get("filter") or {}
+        rows.append({"at": o.get("at", ""), "symbol": o.get("symbol"), "side": o.get("side"),
+                     "provider": f.get("provider"), "skip_probability": f.get("skip_probability"),
+                     "said_skip": f.get("veto"), "error": f.get("error"),
+                     "pnl": round(pnl[int(o["position_id"])], 1) if int(o.get("position_id") or 0) in pnl else None})
+    return rows
 
 
 def ai_last_real_call(events: Sequence[dict[str, Any]], account: str = "ai") -> dt.datetime | None:
