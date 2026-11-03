@@ -217,3 +217,83 @@ def decider_health(events: Sequence[dict[str, Any]], name: str, now: dt.datetime
     if result["failed_1h"]:
         return {**result, "state": "warn", "text": f"直近1時間に{result['failed_1h']}回失敗"}
     return {**result, "state": "ok", "text": "動いている"}
+
+
+# --- 判断を人が読める文にする ---------------------------------------------------------
+def holdings_over_time(events: Sequence[dict[str, Any]]) -> list[bool | None]:
+    """記録の各行の時点で、その行の判断する者が実際の建玉を持っていたか（判断の行以外は None）。"""
+    held: set[str] = set()
+    result: list[bool | None] = []
+    for e in events:
+        kind, account = e.get("kind"), e.get("account")
+        result.append(account in held if kind == "live_decision" else None)
+        if kind == "live_open" and e.get("position_id"):
+            held.add(account)
+        elif kind in ("live_close", "live_gone") and account:
+            held.discard(account)
+        elif kind == "live_fatal":
+            held.clear()
+    return result
+
+
+def action_label(decision: dict[str, Any], holding: bool | None) -> str:
+    """判断の名前。「見送り」は、持っているなら「持ち続ける」、持っていないなら「建てない」と分ける。"""
+    action = decision.get("action")
+    if action == "hold":
+        return {True: "持ち続ける", False: "建てない（様子見）"}.get(holding, "見送り")
+    pair = PAIR_LABELS.get(decision.get("symbol", ""), decision.get("symbol", ""))
+    return {"open_long": f"{pair}を買う", "open_short": f"{pair}を売る", "close": "閉じる"}.get(action, action or "—")
+
+
+def _yen(value: Any) -> str:
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def explain_decision(e: dict[str, Any], holding: bool | None = None) -> str:
+    """判断の理由を、ふつうの文で。AI はその根拠、ロジックは見た数字と決まりの当てはめ。"""
+    decision = e.get("decision") or {}
+    if e.get("error"):
+        return f"AI を呼べなかったので、何もしなかった（{str(e['error'])[:80]}）"
+    if e.get("note"):
+        return "AI を呼ぶ回ではないので、何もしなかった（AI は15分ごとと、見張り役が急変などで起こしたときに呼ぶ）"
+    if decision.get("reasoning"):
+        return str(decision["reasoning"])
+    logic = e.get("logic") or {}
+    account = str(e.get("account", ""))
+    if account.startswith("carry_trend"):
+        carry, last, average = logic.get("carry_percent"), logic.get("last_close"), logic.get("average_50d")
+        parts = []
+        if carry is None:
+            parts.append("金利差がわからない")
+        else:
+            parts.append(f"金利差は {carry:+.2f}%（{'プラスなので買う側が有利' if carry > 0 else 'プラスではない'}）")
+        if last is None or average is None:
+            parts.append("50営業日の平均が出せない")
+        else:
+            parts.append(f"前の営業日の終値 {_yen(last)} は50営業日の平均 {_yen(average)} より"
+                         f"{'上（上向きの流れ）' if last > average else '下（流れが弱い）'}")
+        met = logic.get("target") == 1
+        conclusion = ("2つの条件がそろっている" if met else "条件がそろっていない")
+        if holding or logic.get("held"):
+            tail = "ので、持ち続ける" if met else "ので、閉じる"
+        else:
+            tail = "ので、買う" if met else "ので、建てない"
+        sizing = ""
+        if met and logic.get("risk_fraction") and not (holding or logic.get("held")):
+            sizing = f"。流れの強さ {logic.get('trend_scale')} から、1回の損切りで資金の {float(logic['risk_fraction']):.1%} まで"
+        return "。".join(parts) + "。" + conclusion + tail + sizing
+    if account == "rule_hourly_breakout":
+        last, high, low = logic.get("last_close"), logic.get("high_20h"), logic.get("low_20h")
+        if last is None or high is None or low is None:
+            return "1時間足がまだ足りない"
+        where = ("直近20本の高値を上抜けた" if last > high else "直近20本の安値を下抜けた" if last < low
+                 else f"直近20本の高値 {_yen(high)} と安値 {_yen(low)} の間にある")
+        return f"1時間足の終値 {_yen(last)} は{where}" + ("ので、その向きに建てる" if decision.get("action") != "hold" else "ので、何もしない")
+    if account == "buy_and_hold":
+        return "持っているので、そのまま" if logic.get("held") else "持っていないので、買う"
+    if account == "no_trade":
+        return "一切売買しない（比べる基準）"
+    return ""

@@ -47,3 +47,19 @@ def test_push_appends_only_new_lines_and_keeps_others_writes(tmp_path):
     assert gcs.content == b"a\ntheirs\nmine\n"  # どちらも残る
     assert f.push()  # 足した分が無ければ何もしない
     assert gcs.content == b"a\ntheirs\nmine\n"
+
+
+class MissingGcs(FakeGcs):
+    def get(self, url, params=None, timeout=None):
+        return FakeResponse(404)
+
+
+def test_pull_of_missing_object_leaves_no_empty_file(tmp_path):
+    """クラウドに無いファイルを空で作らない（空の JSON を読んで AI が毎回失敗していた）。"""
+    local = tmp_path / "ai_models.json"
+    local.write_text("古い")
+    f = SyncedFile(MissingGcs(b""), "b", "state/ai_models.json", local)
+    f.pull()
+    assert not local.exists()
+    f.pull()
+    assert not local.exists()
