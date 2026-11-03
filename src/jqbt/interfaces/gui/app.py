@@ -826,6 +826,11 @@ def watch_panel(events: list[dict] | None = None) -> None:
                                          snap.get("next_session"))
                 looks += [f"見直し: {v['price']:.3f} で{v['label']}{'（済み）' if v['done'] else ''}"
                           for v in r.get("reviews", [])]
+                t = r.get("thesis") or {}
+                if t.get("invalidation_price"):
+                    looks.append(f"予想: {t['invalidation_price']} を越えたら根拠が崩れる")
+                if t.get("target_price") and t.get("hold_minutes"):
+                    looks.append(f"予想: {t['hold_minutes']:.0f}分で {t['target_price']} まで（遅れたら見直す）")
                 if r.get("account") != "ai":
                     looks.insert(0, "機械の判断なので、AI ではなく決まり（ロジック）が5分ごとに見る")
                 st.caption("次に見るとき: " + "／".join(looks))
@@ -1175,6 +1180,10 @@ def live_decisions() -> None:
         "リスク": f"資金の{float((e.get('decision') or {}).get('risk_fraction') or (e.get('logic') or {}).get('risk_fraction') or 0):.1%}"
         if str((e.get("decision") or {}).get("action", "")).startswith("open") else "",
         "自信": {"high": "高い", "medium": "中くらい", "low": "低い"}.get((e.get("decision") or {}).get("confidence"), ""),
+        "取引の形": {"trend": "流れに乗る", "pullback": "押し目・戻り", "reversal": "行き過ぎの戻り",
+                   "breakout": "節目抜け", "range": "範囲の上下"}.get((e.get("decision") or {}).get("setup"), ""),
+        "予想": (f"{d['target_price']} まで・{d['invalidation_price']} で崩れる"
+                 if (d := (e.get("decision") or {})).get("target_price") else ""),
         "今なら建てるか": ("建てる" if (e.get("decision") or {}).get("would_open_now") else "建てない")
         if h and "would_open_now" in (e.get("decision") or {}) else "",
         "この先の見込み": (e.get("decision") or {}).get("outlook", "") or "",
