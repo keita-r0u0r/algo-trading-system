@@ -618,7 +618,7 @@ def fx_live_controls() -> None:
             (pill("注文を出す設定", "ok") if enabled else pill("注文を出さない設定（記録だけ）", "info")) + " " +
             (pill("キルスイッチ: 入", "bad") if kill.exists() else pill("キルスイッチ: 切", "ok")),
             unsafe_allow_html=True)
-        st.caption("実際に売買する判断する者: AI・金利差＋流れ（ドル円）・ハーネス＋決まり。実際の口座の状態を見て判断し、"
+        st.caption("実際に売買する判断する者: AI・金利差＋流れ（4通貨ペア）・ハーネス＋決まり・Jev。実際の口座の状態を見て判断し、"
                    "状況に応じた数量（1口座1,000通貨まで。ハーネス＋決まりは比べるあいだ300通貨まで）で、"
                    "損切りは GMOコイン側に置く。ペーパー運用とは独立。注文を出す設定は infra の fx_live_enabled")
         if kill.exists():
