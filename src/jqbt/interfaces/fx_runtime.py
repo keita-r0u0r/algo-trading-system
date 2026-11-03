@@ -348,6 +348,10 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *
             "note": "この先12時間・直前2時間の、通貨ペアに関係する経済指標の発表（重要度は中以上。時刻は日本時間。"
                     "minutes_from_now が負なら発表済み）。予定が取れなかったときは空",
         }
+        notes = active_notes(now)
+        if notes:
+            context["user_notes"] = [{"at": n["at"][5:16].replace("T", " "), "until": n["until"][5:16].replace("T", " "),
+                                      "text": n["text"]} for n in notes]
         if ctx.trigger:
             context["market"]["wake_reason"] = f"見張り役がこの回を起こした理由: {ctx.trigger}"
         try:
@@ -454,6 +458,19 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
 
 
 CALENDAR = STATE / "fx_calendar.json"
+#: 利用者が画面から残したメモ（AI の判断に、期限まで渡す）。{"kind": "note", id, at, text, until} と {"kind": "delete", id}
+NOTES = STATE / "fx_notes.jsonl"
+
+
+def active_notes(now: dt.datetime, path: Path | None = None) -> list[dict]:
+    """期限内で、消されていない利用者のメモ（古い順）。"""
+    try:
+        rows = [json.loads(line) for line in (path or NOTES).read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, ValueError):
+        return []
+    deleted = {r.get("id") for r in rows if r.get("kind") == "delete"}
+    return [r for r in rows if r.get("kind") == "note" and r.get("id") not in deleted
+            and dt.datetime.fromisoformat(r["until"]) > now]
 
 
 def load_calendar(now: dt.datetime) -> list:
@@ -596,7 +613,8 @@ def write_positions(accounts: dict[str, PaperAccount]) -> None:
     """見張り役のための、今の建玉の要約（ペーパーと実際）。"""
     rows = [{"venue": "paper", "account": a.name, "symbol": a.position.symbol, "stop": a.position.stop,
              "take": a.position.take} for a in accounts.values() if a.position is not None]
-    rows += [{"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take}
+    rows += [{"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take,
+              "price": p.price, "side": p.side, "opened_at": p.opened_at}
              for p in book_from_events(fx_live_log.load()).values()]
     try:
         POSITIONS.write_text(json.dumps({"at": dt.datetime.now(JST).isoformat(timespec="seconds"), "positions": rows},

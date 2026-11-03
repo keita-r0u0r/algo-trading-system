@@ -10,6 +10,7 @@ import datetime as dt
 import json
 import os
 import subprocess
+import uuid
 from pathlib import Path
 
 import altair as alt
@@ -785,7 +786,7 @@ def health_panel(events: list[dict]) -> None:
                             f"影響: {f.impact or '—'}<br>やること: <b>{f.action or '—'}</b></div>", unsafe_allow_html=True)
 
 
-def watch_panel() -> None:
+def watch_panel(events: list[dict] | None = None) -> None:
     """常時監視: 見張り役が今なにを見張っていて、判断を起こす線まであとどれくらいか。"""
     state = watcher_state()
     snap = state.get("watch") or {}
@@ -813,13 +814,21 @@ def watch_panel() -> None:
             } for sym, v in snap["symbols"].items()]), hide_index=True, width="stretch")
         live_positions = [r for r in snap.get("positions", []) if r.get("venue") == "live"]
         if live_positions:
-            near = rules.get("near_pips", 3)
-            st.dataframe(pd.DataFrame([{
-                "見張っている建玉": vm.account_label(r.get("account", "")), "通貨": vm.PAIR_LABELS.get(r["symbol"], r["symbol"]),
-                "損切りまで": f"{r['pips_to_stop']:.1f} pips" if r.get("pips_to_stop") is not None else "—",
-                "利確まで": f"{r['pips_to_take']:.1f} pips" if r.get("pips_to_take") is not None else "利確なし",
-                "起こす線": f"{near:g} pips 以内",
-            } for r in live_positions]), hide_index=True, width="stretch")
+            ai_last = vm.ai_last_real_call(events or [])
+            for r in live_positions:
+                price = (snap.get("symbols") or {}).get(r["symbol"], {}).get("price")
+                head = (f"**{vm.account_label(r.get('account', ''))}** {vm.PAIR_LABELS.get(r['symbol'], r['symbol'])}"
+                        + (f" — 含み損益 {r['unrealized_pips']:+.1f} pips" if r.get("unrealized_pips") is not None else "")
+                        + (f"（最高 {r['peak_pips']:+.1f}、{r['giveback_at_pips']:+.1f} まで減ったら AI が見直す）"
+                           if r.get("peak_pips") is not None else ""))
+                st.markdown(head)
+                looks = vm.ai_next_looks(r, price, now, ai_last if r.get("account") == "ai" else None, rules,
+                                         snap.get("next_session"))
+                looks += [f"見直し: {v['price']:.3f} で{v['label']}{'（済み）' if v['done'] else ''}"
+                          for v in r.get("reviews", [])]
+                if r.get("account") != "ai":
+                    looks.insert(0, "機械の判断なので、AI ではなく決まり（ロジック）が5分ごとに見る")
+                st.caption("次に見るとき: " + "／".join(looks))
         wakes = state.get("wakes") or []
         if wakes:
             st.markdown("**最近の随時判断**（見張り役が起こした回）")
@@ -830,6 +839,86 @@ def watch_panel() -> None:
         if not snap:
             st.caption("監視の詳しい様子は、見張り役が新しい版になると出ます")
     calendar_panel(now)
+
+
+@st.cache_resource
+def consult_assistant():
+    """AI（拡張パーツ）。本体は拡張パーツを import しないので、名前で読み込む（interfaces/extensions.py と同じ）。"""
+    import importlib
+
+    return importlib.import_module("jqbt.extensions.ai").build_assistant()
+
+
+def consult_context(events: list[dict], prices: dict) -> dict:
+    """AI との相談に渡す材料（判断の回と同じ種類の材料を、人が聞く形にまとめる）。"""
+    from jqbt.application import fx_calendar
+    from jqbt.infrastructure import econ_calendar
+    from jqbt.interfaces import fx_runtime as rt
+
+    now = dt.datetime.now(JST)
+    decisions = [e for e in events if e.get("kind") == "live_decision" and (e.get("decision") or {}).get("reasoning")][-8:]
+    return {
+        "now_jst": now.strftime("%Y-%m-%d %H:%M (%a)"),
+        "positions": live_positions(events, prices),
+        "watch": (watcher_state().get("watch") or {}).get("positions"),
+        "recent_decisions": [{"at": e["at"][5:16], "account": e.get("account"), "action": e["decision"].get("action"),
+                              "symbol": e["decision"].get("symbol"), "reasoning": e["decision"].get("reasoning"),
+                              "exit_condition": e["decision"].get("exit_condition"),
+                              "would_open_now": e["decision"].get("would_open_now"),
+                              "outlook": e["decision"].get("outlook")} for e in decisions],
+        "economic_calendar": fx_calendar.upcoming(fx_calendar.parse(econ_calendar.read(rt.CALENDAR).get("events") or []),
+                                                  now, rt.SYMBOLS),
+        "user_notes": [n["text"] for n in rt.active_notes(now)],
+        "rules": "AI は15分ごと・見張り役が起こしたとき（急変・損切り/利確の手前・含み損益の見直しの線・含み益の目減り・"
+                 "時間帯の切り替わり）に判断する。1回の損切りは資金の最大5%、数量は1,000通貨まで",
+    }
+
+
+def ai_consult_panel(events: list[dict], prices: dict) -> None:
+    """AI と軽く相談する欄と、AI の判断に渡すメモ。注文はここからは出さない。"""
+    from jqbt.interfaces import fx_runtime as rt
+
+    if "ai" not in os.environ.get("JQBT_EXTENSIONS", ""):
+        return
+    with st.expander("AI と相談する・AI にメモを渡す", icon=":material/forum:"):
+        history = st.session_state.setdefault("consult", [])
+        for q, a in history[-6:]:
+            st.markdown(f"**あなた**: {q}")
+            st.markdown(f"**AI**: {a}")
+        with st.form("consult", clear_on_submit=True):
+            question = st.text_area("質問", placeholder="ポンド円の含み損、今どうするのがよい？ 閉じる条件はまだ生きている？",
+                                    height=80)
+            if st.form_submit_button("聞く", type="primary") and question.strip():
+                context = {**consult_context(events, prices),
+                           "conversation": [{"q": q, "a": a} for q, a in history[-3:]]}
+                try:
+                    with st.spinner("AI が考えています…"):
+                        reply = consult_assistant().explain(
+                            question + "\n（建玉の判断なら、今の値段から見て期待値の高い選択を、具体的な値段つきで答えて）",
+                            context, dt.date.today())
+                    history.append((question.strip(), reply.text))
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"AI を呼べませんでした: {type(exc).__name__}: {str(exc)[:200]}")
+        st.caption("相談は答えを返すだけで、注文は出しません。1回 約 $0.002。")
+        st.markdown("**AI にメモを渡す**（期限まで、毎回の判断の材料に入る。AI は枠と損切りの範囲で従う）")
+        now = dt.datetime.now(JST)
+        with st.form("note", clear_on_submit=True):
+            text = st.text_input("メモ", placeholder="今夜の選挙の結果が出るまで、新しく建てないで")
+            hours = st.selectbox("期限", [1, 3, 6, 12, 24], index=1, format_func=lambda h: f"{h}時間")
+            if st.form_submit_button("渡す") and text.strip():
+                note = {"kind": "note", "id": uuid.uuid4().hex[:8], "at": now.isoformat(timespec="seconds"),
+                        "until": (now + dt.timedelta(hours=hours)).isoformat(timespec="seconds"), "text": text.strip()}
+                with rt.NOTES.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(note, ensure_ascii=False) + "\n")
+                st.rerun()
+        for n in rt.active_notes(now):
+            c1, c2 = st.columns([6, 1])
+            c1.markdown(f"- {n['text']}（{n['until'][5:16].replace('T', ' ')} まで）")
+            if c2.button("消す", key=f"note-{n['id']}"):
+                with rt.NOTES.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"kind": "delete", "id": n["id"], "at": now.isoformat(timespec="seconds")}) + "\n")
+                st.rerun()
 
 
 def calendar_panel(now: dt.datetime) -> None:
@@ -865,7 +954,8 @@ def live_overview() -> None:
     price_strip(prices)
     events = live_log()
     health_panel(events)
-    watch_panel()
+    watch_panel(events)
+    ai_consult_panel(events, prices)
     snapshots = [e for e in events if e.get("kind") == "snapshot" and live_assets(e)]
     if not snapshots:
         st.info("まだ口座を読んだ記録がありません（15分ごとに読みます）", icon=":material/hourglass_empty:")
@@ -1085,6 +1175,9 @@ def live_decisions() -> None:
         "リスク": f"資金の{float((e.get('decision') or {}).get('risk_fraction') or (e.get('logic') or {}).get('risk_fraction') or 0):.1%}"
         if str((e.get("decision") or {}).get("action", "")).startswith("open") else "",
         "自信": {"high": "高い", "medium": "中くらい", "low": "低い"}.get((e.get("decision") or {}).get("confidence"), ""),
+        "今なら建てるか": ("建てる" if (e.get("decision") or {}).get("would_open_now") else "建てない")
+        if h and "would_open_now" in (e.get("decision") or {}) else "",
+        "この先の見込み": (e.get("decision") or {}).get("outlook", "") or "",
         "閉じる条件": (e.get("decision") or {}).get("exit_condition", "") or "",
         "保有の目安": f"{(e.get('decision') or {}).get('hold_minutes'):.0f}分"
         if (e.get("decision") or {}).get("hold_minutes") else "",

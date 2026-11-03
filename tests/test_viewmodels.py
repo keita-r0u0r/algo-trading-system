@@ -120,3 +120,22 @@ def test_explain_ai_default_hold_and_holdings():
               {"kind": "live_gone", "account": "ai"},
               {"kind": "live_decision", "account": "ai"}]
     assert holdings_over_time(events) == [False, None, True, None, False]
+
+
+def test_ai_next_looks_lists_every_trigger():
+    import datetime as dt
+
+    from jqbt.interfaces import viewmodels as vm
+
+    jst = dt.timezone(dt.timedelta(hours=9))
+    now = dt.datetime(2026, 11, 3, 21, 34, tzinfo=jst)
+    events = [{"kind": "live_decision", "account": "ai", "model": "m", "at": "2026-11-03T21:26:00+09:00",
+               "logged_at": "2026-11-03T12:26:40+00:00"},
+              {"kind": "live_decision", "account": "ai", "model": "m", "note": "呼ばなかった", "at": "2026-11-03T21:31:00+09:00"}]
+    last = vm.ai_last_real_call(events)
+    assert last == dt.datetime(2026, 11, 3, 21, 26, 40, tzinfo=jst)
+    looks = vm.ai_next_looks({"stop": 212.017, "take": 212.617}, 212.118, now, last,
+                             {"near_pips": 3, "move_pips": 15, "window_minutes": 5}, "22:00")
+    assert looks[0] == "定期: 21:41 ごろ（15分ごと）"
+    assert "212.047 に下がったら" in looks[1] and "212.587 に上がったら" in looks[2]
+    assert looks[-1] == "時間帯の切り替わり: 22:00"
