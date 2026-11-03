@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 import pandas as pd
 
-from ..application import fx_calendar, fx_exits, fx_features, fx_filter, fx_setups
+from ..application import fx_calendar, fx_exits, fx_features, fx_filter, fx_setups, fx_sizing
 from ..application.fx_live_trade import Intent, LiveConfig, book_from_events
 from ..application.fx_paper import (
     PaperAccount,
@@ -365,7 +365,9 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *
             return [(data, f"AI（同じ状態の判断を使い回し）: {data.get('reasoning', '')}", {**extra, "reused": True})]
         context = ai_context(account, frame, quotes, bars, now, events, ctx.today_rates, ctx.daily)
         if live:
-            context["frame"]["max_units"] = LiveConfig().max_units
+            sizing = ctx.settings.sizing_for("ai")
+            context["frame"]["max_units"] = sizing.max_units
+            context["frame"]["max_risk_per_trade"] = min(context["frame"].get("max_risk_per_trade", 1), sizing.max_risk)
             context["goal"] = ("実際の口座。利用者の目標は1か月で資金1.5倍。数量は risk_fraction（枠の上限まで）で決まる。"
                                "根拠が強いときは大きく、弱いときは小さく、無いときは hold。枠と損切りは必ず守る")
         context["market"]["economic_calendar"] = {
@@ -611,8 +613,9 @@ def harness_decision(account: PaperAccount, ctx: "Context", events: list[dict]) 
     logic = {**record, "evidence": seen}
     if candidate is None:
         return {"action": "hold"}, "", {"logic": logic}
-    verdict, exit_choice = consult_candidate(ctx, candidate.decision(HARNESS), features[candidate.symbol])
-    decision = candidate.decision(HARNESS, exit_choice["method"])
+    rules = replace(HARNESS, risk_fraction=ctx.settings.sizing_for("harness").max_risk)  # 決まりは上限いっぱいで建てる
+    verdict, exit_choice = consult_candidate(ctx, candidate.decision(rules), features[candidate.symbol])
+    decision = candidate.decision(rules, exit_choice["method"])
     logic["exit_choice"] = exit_choice
     ok, note = fx_filter.apply(verdict, ctx.settings.filter)
     if verdict is not None:
@@ -620,6 +623,49 @@ def harness_decision(account: PaperAccount, ctx: "Context", events: list[dict]) 
     if not ok:
         return {"action": "hold"}, "", {"logic": logic, "note": note}
     return decision, "決まり: " + decision["reasoning"], {"logic": logic, "note": note}
+
+
+SIZING_PROPOSALS = STATE / "fx_sizing_proposals.jsonl"
+#: 画面だけが書く（提案への答え）。見張り役とジョブは読まない
+SIZING_ANSWERS = STATE / "fx_sizing_answers.jsonl"
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    try:
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def append_jsonl(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def propose_sizing(ai, events: list[dict], settings: fx_filter.FxSettings, *, equity: float,
+                   available: float | None, now: dt.datetime, trigger: str) -> dict:
+    """AI に数量の上限の見直しを提案させ、記録に残す（適用はしない）。"""
+    context = fx_sizing.sizing_context(events, settings, equity=equity, available=available, now=now,
+                                       accounts=LiveConfig().accounts)
+    reply = ai.fx_sizing(context, now.date())
+    record = fx_sizing.proposal_record(reply.data or {}, settings, now, reply.model, trigger)
+    append_jsonl(SIZING_PROPOSALS, record)
+    return record
+
+
+def maybe_propose_sizing(ctx: "Context", session) -> None:
+    """1日1回、AI に数量の見直しを提案させる（失敗しても売買は止めない）。"""
+    if ctx.ai is None or not fx_sizing.due(read_jsonl(SIZING_PROPOSALS), ctx.now):
+        return
+    try:
+        record = propose_sizing(ctx.ai, session.log + session.events, ctx.settings, equity=session.equity,
+                                available=float(session.assets.get("availableAmount") or 0), now=ctx.now,
+                                trigger="1日1回の見直し")
+        print(f"  数量の見直しの提案: {len(record['changes'])} 件", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        append_jsonl(SIZING_PROPOSALS, {"kind": "error", "at": ctx.now.isoformat(timespec="seconds"),
+                                        "error": f"{type(exc).__name__}: {str(exc)[:200]}"})
 
 
 CALENDAR = STATE / "fx_calendar.json"
@@ -844,6 +890,9 @@ def trade_live(ctx: "Context") -> bool:
     session = LiveSession.open()
     if session is None:
         return False
+    # 数量の上限は画面の設定（全体の枠 LiveConfig.max_units の内側）
+    session.config = replace(session.config, max_units_by_account=tuple(
+        (name, ctx.settings.sizing_for(name).max_units) for name in session.config.accounts))
     intents: list[Intent] = []
     for name in session.config.accounts:
         view = live_view(name, session)
@@ -853,6 +902,10 @@ def trade_live(ctx: "Context") -> bool:
         account_frame = ctx.live_frame
         for decision, reason, extra in decide(name, view, ctx, session.log + session.events, live=True):
             equity = session.equity
+            cap = ctx.settings.sizing_for(name).max_risk
+            if str(decision.get("action", "")).startswith("open") and float(decision.get("risk_fraction") or 0) > cap:
+                decision = {**decision, "risk_fraction": cap}  # 画面で決めたリスクの上限で切る
+                extra = {**extra, "note": ((extra.get("note") or "") + f" リスクの割合を上限 {cap:.1%} で切った").strip()}
             approved, rejected = check(
                 decision, account_frame, equity=equity, holding=view.position.symbol if view.position else None,
                 spread_pips={s: q["spread"] for s, q in ctx.quotes.items()},
@@ -873,6 +926,7 @@ def trade_live(ctx: "Context") -> bool:
                                   stop_pips=approved.stop_pips, take_pips=approved.take_pips, reason=reason))
     session.execute(intents)
     session.finish()
+    maybe_propose_sizing(ctx, session)
     return True
 
 

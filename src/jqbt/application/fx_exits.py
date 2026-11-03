@@ -49,7 +49,8 @@ class ExitParams:
     breakeven_at_r: float = 1.5
     percent_at_r: float = 1.0
     percent_giveback: float = 0.5
-    chandelier_k: float = 1.5
+    #: 過去の前半（2025年10月〜2026年6月）で選び、後半（2026年7〜10月）で確かめた値（1・1.5・2・3 を比べた）
+    chandelier_k: float = 2.0
     structure_bars: int = 6
     structure_buffer_pips: float = 2.0
     cost_pips: float = 1.0

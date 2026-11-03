@@ -34,9 +34,37 @@ class FilterSettings:
 
 @dataclass(frozen=True)
 class ExitSettings:
-    #: 実運用で手法ごとの成績を溜めるため、既定は Jev に選ばせる（選べなければ method）
-    selector: str = "jev"
+    #: 過去の後半で Jev に選ばせると35回とも chandelier を選び、選ばせる利点が無かったので、既定は決まった手法
+    selector: str = "fixed"
     method: str = "chandelier"
+
+
+#: 数量の枠の外側（利用者が決めた: 1口座1,000通貨・1回の損切りで資金の5%まで）。画面でもこの内側でしか変えられない
+UNITS_RANGE = (100, 1_000)
+RISK_RANGE = (0.0025, 0.05)
+
+
+@dataclass(frozen=True)
+class Sizing:
+    max_units: int
+    max_risk: float
+
+
+#: 判断する者ごとの数量の上限の既定（ハーネス＋決まりは、比べ始めは小さく）
+DEFAULT_SIZING = {"ai": Sizing(1_000, 0.05), "carry_trend_USD_JPY": Sizing(1_000, 0.05), "harness": Sizing(300, 0.01)}
+
+
+def clamp_sizing(max_units: Any, max_risk: Any, default: Sizing) -> Sizing:
+    """枠の内側に収める（100通貨単位）。読めない値は既定。"""
+    try:
+        units = int(round(float(max_units) / 100) * 100)
+    except (TypeError, ValueError):
+        units = default.max_units
+    try:
+        risk = float(max_risk)
+    except (TypeError, ValueError):
+        risk = default.max_risk
+    return Sizing(min(UNITS_RANGE[1], max(UNITS_RANGE[0], units)), round(min(RISK_RANGE[1], max(RISK_RANGE[0], risk)), 4))
 
 
 @dataclass(frozen=True)
@@ -45,13 +73,17 @@ class FxSettings:
     filter: FilterSettings = FilterSettings()
     updated_at: str = ""
     exits: ExitSettings = ExitSettings()
+    sizing: dict[str, Sizing] = field(default_factory=lambda: dict(DEFAULT_SIZING))
 
     def enabled(self, name: str) -> bool:
         return self.deciders.get(name, True)
 
+    def sizing_for(self, name: str) -> Sizing:
+        return self.sizing.get(name) or DEFAULT_SIZING.get(name) or Sizing(UNITS_RANGE[1], RISK_RANGE[1])
+
     def to_dict(self) -> dict[str, Any]:
         return {"deciders": dict(self.deciders), "filter": asdict(self.filter), "exits": asdict(self.exits),
-                "updated_at": self.updated_at}
+                "sizing": {k: asdict(v) for k, v in self.sizing.items()}, "updated_at": self.updated_at}
 
 
 def parse_settings(raw: dict[str, Any] | None) -> FxSettings:
@@ -68,7 +100,11 @@ def parse_settings(raw: dict[str, Any] | None) -> FxSettings:
     e = raw.get("exits") or {}
     exits = ExitSettings(e.get("selector") if e.get("selector") in EXIT_SELECTORS else ExitSettings.selector,
                          e.get("method") if e.get("method") in EXIT_METHODS else ExitSettings.method)
-    return FxSettings(deciders, FilterSettings(mode, provider, threshold), str(raw.get("updated_at", "")), exits)
+    raw_sizing = raw.get("sizing") or {}
+    sizing = {name: clamp_sizing((raw_sizing.get(name) or {}).get("max_units", d.max_units),
+                                 (raw_sizing.get(name) or {}).get("max_risk", d.max_risk), d)
+              for name, d in DEFAULT_SIZING.items()}
+    return FxSettings(deciders, FilterSettings(mode, provider, threshold), str(raw.get("updated_at", "")), exits, sizing)
 
 
 SKIP_QUESTION = (

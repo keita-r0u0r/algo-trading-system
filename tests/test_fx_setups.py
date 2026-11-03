@@ -78,14 +78,14 @@ def check(**kw):
 
 
 def test_chandelier_trails_from_the_high_by_atr():
-    r = check(price=158.20, bars=path(158.0, 158.40))  # 線 = 158.40 − 1.5 × 20 pips = 158.10
+    r = check(price=158.20, bars=path(158.0, 158.50))  # 線 = 158.50 − 2 × 20 pips = 158.10
     assert not r.close and r.exit_level == 158.10
-    r = check(price=158.09, bars=path(158.0, 158.40))
+    r = check(price=158.09, bars=path(158.0, 158.50))
     assert r.close and "158.1" in r.reason
 
 
 def test_trail_never_sits_below_the_initial_stop():
-    assert check(price=158.05, bars=path(158.0, 158.05)).exit_level is None  # 158.05 − 0.30 は最初の損切りより下
+    assert check(price=158.05, bars=path(158.0, 158.05)).exit_level is None  # 158.05 − 0.40 は最初の損切りより下
 
 
 def test_breakeven_and_percent_peak_and_target():

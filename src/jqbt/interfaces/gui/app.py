@@ -666,12 +666,80 @@ def decider_settings() -> None:
             if st.form_submit_button("保存", type="primary"):
                 rt.save_settings(fx_filter.FxSettings(
                     deciders, fx_filter.FilterSettings(mode, provider, threshold),
-                    dt.datetime.now(JST).isoformat(timespec="seconds"), fx_filter.ExitSettings(selector, method)))
+                    dt.datetime.now(JST).isoformat(timespec="seconds"), fx_filter.ExitSettings(selector, method),
+                    current.sizing))
                 flash("売買の作りの設定を保存しました。次の回から効きます")
                 st.rerun()
         if current.updated_at:
             st.caption(f"最後に変えた時刻: {current.updated_at[5:16].replace('T', ' ')}。"
-                       "Jev は1回 約 $0.0001、AI（Gemini）は1回 約 $0.003")
+                       "Jev は1回 約 $0.00004、AI（Gemini）は1回 約 $0.003")
+    sizing_panel(current)
+
+
+def sizing_panel(current) -> None:
+    """判断する者ごとの数量の上限と、AI の見直しの提案（適用は利用者が押したときだけ）。"""
+    from jqbt.application import fx_filter, fx_sizing
+    from jqbt.interfaces import fx_runtime as rt
+
+    with st.container(border=True):
+        st.markdown("**数量の上限（判断する者ごと）**")
+        st.caption(f"全体の枠は1口座 {fx_filter.UNITS_RANGE[1]:,}通貨・1回の損切りで資金の {fx_filter.RISK_RANGE[1]:.0%} まで。"
+                   "この内側で変えられる。ハーネス＋決まりは、上限のリスクいっぱいで建てる（数量は損切り幅から逆算）")
+        with st.form("sizing_form"):
+            new = {}
+            for name in fx_filter.DEFAULT_SIZING:
+                now = current.sizing_for(name)
+                c1, c2 = st.columns(2)
+                units = c1.number_input(f"{vm.account_label(name)}: 数量の上限（通貨）", min_value=fx_filter.UNITS_RANGE[0],
+                                        max_value=fx_filter.UNITS_RANGE[1], value=now.max_units, step=100, key=f"units-{name}")
+                risk = c2.number_input(f"{vm.account_label(name)}: 1回の損切りで失ってよい資金の割合（%）",
+                                       min_value=fx_filter.RISK_RANGE[0] * 100, max_value=fx_filter.RISK_RANGE[1] * 100,
+                                       value=now.max_risk * 100, step=0.25, key=f"risk-{name}")
+                new[name] = fx_filter.clamp_sizing(units, risk / 100, now)
+            if st.form_submit_button("数量の上限を保存", type="primary"):
+                rt.save_settings(fx_filter.FxSettings(current.deciders, current.filter,
+                                                      dt.datetime.now(JST).isoformat(timespec="seconds"),
+                                                      current.exits, new))
+                flash("数量の上限を保存しました。次の回から効きます")
+                st.rerun()
+        proposals, answers = rt.read_jsonl(rt.SIZING_PROPOSALS), rt.read_jsonl(rt.SIZING_ANSWERS)
+        proposal = fx_sizing.pending(proposals, answers)
+        st.markdown("**AI からの数量の見直しの提案**（1日1回。適用を押すまで何も変わらない）")
+        if proposal:
+            st.info(f"{proposal['at'][5:16].replace('T', ' ')} の提案: {proposal['summary']}", icon=":material/lightbulb:")
+            st.dataframe(pd.DataFrame([{
+                "判断する者": vm.account_label(c["account"]),
+                "数量の上限": f"{c['from']['max_units']:,} → {c['to']['max_units']:,} 通貨",
+                "リスクの上限": f"{c['from']['max_risk']:.2%} → {c['to']['max_risk']:.2%}",
+                "理由": c["reason"]} for c in proposal["changes"]]), hide_index=True, width="stretch")
+            a1, a2 = st.columns(2)
+            now = dt.datetime.now(JST)
+            if a1.button("この提案を適用する", type="primary", icon=":material/check:"):
+                rt.save_settings(fx_sizing.apply(current, proposal, now))
+                rt.append_jsonl(rt.SIZING_ANSWERS, {"id": proposal["id"], "answer": "applied", "at": now.isoformat(timespec="seconds")})
+                flash("提案を適用しました。次の回から効きます")
+                st.rerun()
+            if a2.button("見送る", icon=":material/close:"):
+                rt.append_jsonl(rt.SIZING_ANSWERS, {"id": proposal["id"], "answer": "rejected", "at": now.isoformat(timespec="seconds")})
+                st.rerun()
+        else:
+            last = next((p for p in reversed(proposals)), None)
+            st.caption("答えていない提案はありません" + (
+                f"（最後: {last['at'][5:16].replace('T', ' ')} " +
+                (f"{last.get('summary', '')}" if last.get("kind") == "proposal" else f"失敗 {last.get('error', '')}") + "）"
+                if last else ""))
+        if "ai" in os.environ.get("JQBT_EXTENSIONS", "") and st.button("今すぐ AI に提案させる", icon=":material/psychology:"):
+            events = live_log()
+            snap = next((e for e in reversed(events) if e.get("kind") == "snapshot"), {})
+            assets = live_assets(snap)
+            try:
+                with st.spinner("AI が成績を見ています…"):
+                    rt.propose_sizing(consult_assistant(), events, current, equity=float(assets.get("equity") or 0),
+                                      available=float(assets.get("availableAmount") or 0),
+                                      now=dt.datetime.now(JST), trigger="画面から")
+                st.rerun()
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"AI を呼べませんでした: {type(exc).__name__}: {str(exc)[:200]}")
 
 
 def fx_live_trades() -> None:

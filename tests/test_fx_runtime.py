@@ -180,7 +180,7 @@ def test_harness_opens_on_rules_and_asks_jev_only_to_skip(tmp_path, monkeypatch)
     jev = Jev(0.9)
     d, reason, extra = rt.harness_decision(empty, harness_ctx({"USD_JPY": features()}, jev=jev), [])
     assert d["action"] == "open_long" and d["stop_pips"] == 16.0 and reason.startswith("決まり")
-    assert d["exit_method"] == "chandelier" and extra["logic"]["exit_choice"]["by"] == "jev"  # 答えに無ければ決まった手法
+    assert d["exit_method"] == "chandelier" and extra["logic"]["exit_choice"]["by"] == "fixed"
     assert "記録だけ" in extra["note"] and extra["logic"]["filter"]["skip_probability"] == 0.9  # 既定は記録だけ
     assert jev.asked[0][0]["proposed_trade"]["symbol"] == "USD_JPY"
     assert (tmp_path / "jev.jsonl").exists()
@@ -198,14 +198,14 @@ def test_harness_closes_by_its_exit_method():
     from jqbt.application.fx_paper import PaperAccount, PaperPosition
 
     idx = pd.date_range("2026-11-04 09:00", periods=60, freq="1min")
-    bars = pd.DataFrame({"high": [158.0] * 30 + [158.40] + [158.1] * 29, "low": [157.95] * 60}, index=idx)
+    bars = pd.DataFrame({"high": [158.0] * 30 + [158.50] + [158.1] * 29, "low": [157.95] * 60}, index=idx)
     p = PaperPosition("USD_JPY", 300, 158.0, 157.84, None, "2026-11-04T09:00:00+09:00")
     account = PaperAccount("harness", 10000, 10000, p, equity=10000, day_start_equity=10000)
     ctx = harness_ctx({"USD_JPY": features()}, quotes={"USD_JPY": {"bid": 158.08, "ask": 158.10, "spread": 2}},
                       bars={"USD_JPY": bars})
-    d, reason, extra = rt.harness_decision(account, ctx, [])  # シャンデリア: 158.40 − 0.30 = 158.10 を割った
+    d, reason, extra = rt.harness_decision(account, ctx, [])  # シャンデリア: 158.50 − 2 × 20 pips = 158.10 を割った
     assert d["action"] == "close" and "158.1" in reason
-    assert extra["logic"]["peak_pips"] == 40.0 and extra["logic"]["exit_level"] == 158.1
+    assert extra["logic"]["peak_pips"] == 50.0 and extra["logic"]["exit_level"] == 158.1
     events = [{"kind": "live_decision", "account": "harness", "approved": True, "at": "2026-11-04T08:59:00+09:00",
                "decision": {"action": "open_long", "symbol": "USD_JPY", "exit_method": "target"}}]
     d, _, extra = rt.harness_decision(account, ctx, events)  # 建てたときに選んだ手法（利確まで持つ）を使う
