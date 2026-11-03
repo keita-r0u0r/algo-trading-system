@@ -925,6 +925,53 @@ def live_overview() -> None:
                         f"<span style='color:#64748b;font-size:.85rem'>{detail[:140]}</span>", unsafe_allow_html=True)
 
 
+def page_scalp() -> None:
+    header("短期売買（ペーパー）", "見張り役が値段1つずつで判断する短期売買の検証。実際の注文は出さない")
+    live(scalp_body)()
+
+
+def scalp_body() -> None:
+    from jqbt.application import fx_scalp
+
+    path = ROOT / "state" / "fx_scalp.jsonl"
+    try:
+        events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        events = []
+    now_state = (watcher_state().get("scalp") or {})
+    st.caption("うまくいきそうなら、実運用に展開するかを決めます。コストはスプレッド（売値と買値の差）と手数料を込みで計算しています。"
+               "損切り・利確はその値段ちょうどで約定したことにしているので、実際より少し甘めです。")
+    cols = st.columns(len(fx_scalp.RULES))
+    for col, rule in zip(cols, fx_scalp.RULES):
+        s = fx_scalp.summary(events, rule.name)
+        held = (now_state.get(rule.name) or {}).get("position")
+        with col.container(border=True):
+            st.markdown(f"**{vm.account_label(rule.name)}**")
+            st.caption(rule.describe())
+            a, b = st.columns(2)
+            a.metric("評価額", f"{s['equity']:,.0f}円", f"{s['pnl']:+,.1f}円")
+            b.metric("取引", f"{s['trades']}回",
+                     f"勝率 {s['win_rate']:.0%}" if s["win_rate"] is not None else "まだ無し", delta_color="off")
+            if s["trades"]:
+                st.markdown(f"平均 {s['avg_pips']:+.2f} pips／回・勝ち平均 {s['avg_win'] or 0:+.1f}円・"
+                            f"負け平均 {s['avg_loss'] or 0:+.1f}円・手数料 計{s['fees']:.1f}円")
+                st.caption("閉じた理由: " + "、".join(f"{k} {v}回" for k, v in s["by_reason"].items()))
+            if held:
+                st.info(f"保有中: {vm.PAIR_LABELS.get(held['symbol'], held['symbol'])} {'買い' if held['side'] == 'BUY' else '売り'} "
+                        f"@ {held['price']}（損切り {held['stop']}・利確 {held['take']}）", icon=":material/timelapse:")
+    closes = [e for e in events if e.get("kind") == "scalp_close"]
+    if not closes:
+        st.info("まだ取引がありません。急な動き（60秒で5 pips 以上）があったときに建てます", icon=":material/hourglass_empty:")
+        return
+    st.markdown("**取引の記録**（新しい順）")
+    st.dataframe(pd.DataFrame([{
+        "閉じた時刻": e["at"][5:19].replace("T", " "), "口座": vm.account_label(e["account"]),
+        "通貨": vm.PAIR_LABELS.get(e["symbol"], e["symbol"]), "向き": "買い" if e["side"] == "BUY" else "売り",
+        "建値": e["entry"], "決済": e["exit"], "pips": e["pips"], "損益（円）": e["pnl"], "理由": e["reason"],
+        "保有": f"{e['held_seconds'] // 60}分{e['held_seconds'] % 60}秒",
+    } for e in reversed(closes)][:300]), hide_index=True, width="stretch")
+
+
 def page_trades() -> None:
     venue_header("取引履歴", "GMOコインの実際の約定（手数料・スワップ・ずれつき）", "ペーパー運用の仮想の約定")
     live(live_trades if venue() == "live" else paper_trades)()
@@ -1373,6 +1420,7 @@ navigation = st.navigation({
     "取引": [st.Page(page_trades, title="取引履歴", icon=":material/receipt_long:", url_path="trades"),
            st.Page(page_decisions, title="判断の記録", icon=":material/psychology:", url_path="decisions"),
            st.Page(page_compare, title="判断する者の比較", icon=":material/compare_arrows:", url_path="compare"),
+           st.Page(page_scalp, title="短期売買（ペーパー）", icon=":material/bolt:", url_path="scalp"),
            st.Page(page_controls, title="操作", icon=":material/toggle_on:", url_path="controls")],
     "詳細": [st.Page(page_fx_live, title="口座の詳細（実運用）", icon=":material/account_balance_wallet:", url_path="fx-live"),
            st.Page(page_fx_paper, title="口座の詳細（ペーパー）", icon=":material/show_chart:", url_path="fx-paper"),

@@ -153,6 +153,8 @@ ACCOUNT_LABELS = {
     "rule_hourly_breakout": "1時間足の突破",
     "buy_and_hold": "買って持つだけ",
     "no_trade": "一切売買しない",
+    "scalp_fade": "短期・逆張り",
+    "scalp_follow": "短期・順張り",
 }
 PAIR_LABELS = {"USD_JPY": "ドル円", "EUR_JPY": "ユーロ円", "GBP_JPY": "ポンド円", "AUD_JPY": "豪ドル円"}
 

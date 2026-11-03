@@ -8,6 +8,8 @@
   * 定期判断: 5分ごとに、実際の口座の判断をする（AI は15分ごと）
   * 判断と発注の段取りは、ジョブと同じ部品（interfaces/fx_runtime.py・fx_live.py）を使う
   * 記録（state/ の一部）は Cloud Storage と同期する。追記した分だけを、他の書き込みを上書きせずに上げる
+  * 短期売買のペーパー運用（application/fx_scalp.py）も、値段が届くたびにここで判断する（実際の注文は出さない）。
+    記録は state/fx_scalp.jsonl。値段そのものも state/ticks/日付/時.csv.gz に残す（あとでロジックを試し直すため）
   * 1分ごとに生きている印を state/fx_watch.json に書く。口座に届いた回が新しい間、ジョブは実際の売買をしない（ペーパーだけ）
 
 環境変数: GCP_PROJECT, STATE_BUCKET, FX_WATCH_TRADES（true で実際の売買もする）, FX_LIVE_ENABLED ほか
@@ -27,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from jqbt.application import fx_scalp  # noqa: E402
 from jqbt.application.fx_watch import PriceHistory, WatchConfig, reason_to_wake, watch_snapshot  # noqa: E402
 
 JST = dt.timezone(dt.timedelta(hours=9))
@@ -55,6 +58,9 @@ class Cloud:
         self.read_only = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
                           for n in ("ai_settings.json", "ai_models.json", "fx_positions.json")]
         self.flags = [SyncedFlag(self.http, bucket, "state/KILL_fx_live", state_dir / "KILL_fx_live")]
+        #: 短期売買のペーパーの記録。書くのは見張り役だけなので、起動のときだけ取ってきて、あとは上げるだけ
+        #: （判断の回の pull で、まだ上げていない分を上書きしないように、他のファイルとは分ける）
+        self.scalp = SyncedFile(self.http, bucket, "state/fx_scalp.jsonl", state_dir / "fx_scalp.jsonl")
 
     def pull(self) -> None:
         for f in [*self.files, *self.read_only, *self.flags]:
@@ -66,11 +72,82 @@ class Cloud:
         for f in self.flags:
             f.push()
 
+    def upload(self, name: str, data: bytes, content_type: str) -> None:
+        self.http.post(f"https://storage.googleapis.com/upload/storage/v1/b/{self.bucket}/o",
+                       params={"uploadType": "media", "name": name}, data=data,
+                       headers={"Content-Type": content_type}, timeout=60)
+
     def write_json(self, name: str, data: dict) -> None:
         self.http.post(f"https://storage.googleapis.com/upload/storage/v1/b/{self.bucket}/o",
                        params={"uploadType": "media", "name": name},
                        data=json.dumps(data, ensure_ascii=False).encode(), headers={"Content-Type": "application/json"},
                        timeout=20)
+
+
+class TickRecorder:
+    """届いた値段を、1時間ごとのファイルに残す（10分ごとに、その時間の分を上げ直す）。"""
+
+    def __init__(self) -> None:
+        self.hour: str | None = None
+        self.lines: list[str] = []
+        self.last_upload = 0.0
+        self.flush_pending: tuple[str, list[str]] | None = None
+
+    def add(self, at: dt.datetime, symbol: str, bid: str, ask: str) -> None:
+        hour = f"{at:%Y-%m-%d/%H}"
+        if self.hour is not None and hour != self.hour:
+            self.flush_pending = (self.hour, self.lines)
+            self.lines = []
+        self.hour = hour
+        self.lines.append(f"{at.isoformat(timespec='milliseconds')},{symbol},{bid},{ask}")
+
+    def uploads(self, clock: float) -> list[tuple[str, bytes]]:
+        """上げるもの（名前, gzip した中身）。時間が変わったら前の時間の分、10分ごとに今の時間の分。"""
+        import gzip
+
+        out = []
+        if self.flush_pending:
+            out.append(self.flush_pending)
+            self.flush_pending = None
+        if self.hour and self.lines and clock - self.last_upload >= 600:
+            self.last_upload = clock
+            out.append((self.hour, self.lines))
+        return [(f"state/ticks/{hour}.csv.gz", gzip.compress(("at,symbol,bid,ask\n" + "\n".join(lines) + "\n").encode()))
+                for hour, lines in out]
+
+
+class ScalpPaper:
+    """短期売買のペーパー口座たち（値段1つずつで判断。記録は state/fx_scalp.jsonl）。"""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        try:
+            events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except OSError:
+            events = []
+        self.accounts = [fx_scalp.restore(rule, events) for rule in fx_scalp.RULES]
+        self.window = fx_scalp.TickWindow(max(rule.trigger_seconds for rule in fx_scalp.RULES))
+
+    def on_tick(self, symbol: str, at: dt.datetime, bid: float, ask: float) -> None:
+        self.window.add(symbol, at, (bid + ask) / 2)
+        events = []
+        for account in self.accounts:
+            events += fx_scalp.on_tick(account, self.window, symbol, at, bid, ask)
+        if events:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as f:
+                for e in events:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+                    print(f"{at:%H:%M:%S} [短期・ペーパー] {e['account']} {e['kind']} {e['symbol']} {e['side']} "
+                          f"{e.get('price', e.get('exit'))} {e.get('reason', e.get('trigger', ''))}", flush=True)
+
+    def state(self) -> dict:
+        return {a.rule.name: {"cash": round(a.cash, 1), "trades": a.trades, "wins": a.wins,
+                              "position": None if a.position is None else {
+                                  "symbol": a.position.symbol, "side": "BUY" if a.position.side > 0 else "SELL",
+                                  "price": a.position.price, "stop": a.position.stop, "take": a.position.take,
+                                  "opened_at": a.position.opened_at.isoformat(timespec="seconds")}}
+                for a in self.accounts}
 
 
 def current_positions(state_dir: Path) -> list[dict]:
@@ -115,6 +192,10 @@ async def watch(dry_run: bool) -> None:
 
     trades = os.environ.get("FX_WATCH_TRADES", "").lower() == "true" and not dry_run
     cloud = None if dry_run else Cloud(rt.STATE)
+    if cloud:
+        cloud.scalp.pull()
+    scalp = ScalpPaper(rt.STATE / "fx_scalp.jsonl")
+    ticks = TickRecorder()
     history = PriceHistory(dt.timedelta(minutes=CONFIG.window_minutes))
     state = {"started_at": dt.datetime.now(JST).isoformat(timespec="seconds"), "last_tick": None,
              "trading": trades, "version": os.environ.get("JQBT_VERSION", ""),
@@ -163,6 +244,11 @@ async def watch(dry_run: bool) -> None:
                         continue
                     now = dt.datetime.now(JST)
                     history.add(tick["symbol"], now, (float(tick["bid"]) + float(tick["ask"])) / 2)
+                    ticks.add(now, tick["symbol"], tick["bid"], tick["ask"])
+                    try:
+                        scalp.on_tick(tick["symbol"], now, float(tick["bid"]), float(tick["ask"]))
+                    except Exception as exc:  # noqa: BLE001  短期のペーパーが壊れても、見張りと実際の売買は止めない
+                        print(f"短期売買（ペーパー）の失敗: {type(exc).__name__}: {exc}", flush=True)
                     state["last_tick"] = now.isoformat(timespec="seconds")
                     clock = time.monotonic()
                     if cloud and clock - last_positions >= 60 and not busy:
@@ -186,6 +272,13 @@ async def watch(dry_run: bool) -> None:
                                                         fired_sessions=fired)
                         state["next_periodic_at"] = (now + dt.timedelta(seconds=max(0.0, next_periodic - clock))
                                                      ).isoformat(timespec="seconds") if trades else None
+                        state["scalp"] = scalp.state()
+                        try:
+                            await asyncio.to_thread(cloud.scalp.push)
+                            for name, data in ticks.uploads(clock):
+                                await asyncio.to_thread(cloud.upload, name, data, "application/gzip")
+                        except Exception as exc:  # noqa: BLE001  上げられなくても、次の回でやり直す
+                            print(f"短期売買の記録・値段の記録を上げられなかった: {type(exc).__name__}: {exc}", flush=True)
                         await asyncio.to_thread(cloud.write_json, "state/fx_watch.json", state)
         except Exception as exc:  # 切れたら、少し待ってつなぎ直す
             state["reconnects"] += 1
