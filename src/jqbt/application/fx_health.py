@@ -27,6 +27,8 @@ DECISION_STALE_MINUTES = 15
 TICK_STALE_MINUTES = 3
 #: 値段が途切れてもこの分数までは、作り直し（反映）や一時的な切断として「注意」にとどめる。超えたら異常
 TICK_DOWN_MINUTES = 10
+#: 見張り役が起動してからこの分数は、判断する者の遅れを反映のせいとして注意にとどめる（AI は起動後の最初の回で呼ぶ）
+RESTART_GRACE_MINUTES = 10
 ERROR_WINDOW = dt.timedelta(hours=1)
 #: 経済指標の予定は1時間ごとに取り直す。3時間を超えて新しくならなければ、取れていない
 CALENDAR_STALE = dt.timedelta(hours=3)
@@ -63,7 +65,7 @@ def _at(value: Any) -> dt.datetime | None:
 
 
 def decider_health(events: Sequence[dict[str, Any]], name: str, now: dt.datetime, *,
-                   market_open: bool = True) -> dict[str, Any]:
+                   market_open: bool = True, restarted_at: dt.datetime | None = None) -> dict[str, Any]:
     """判断する者 ``name`` の動き具合（実際の口座の判断の記録 live_decision から）。
 
     返すのは 状態（ok / warn / bad / info）・その説明・最後に実際に判断した時刻・直近1時間の内訳・最後の失敗。
@@ -84,6 +86,12 @@ def decider_health(events: Sequence[dict[str, Any]], name: str, now: dt.datetime
     }
     if not market_open:
         return {**result, "state": "info", "text": "市場が閉まっている"}
+    stale = (last is None or now - last > dt.timedelta(minutes=DECISION_STALE_MINUTES)
+             or last_real is None or now - last_real > dt.timedelta(minutes=AI_STALE_MINUTES if is_ai else DECISION_STALE_MINUTES))
+    if stale and restarted_at and now - restarted_at <= dt.timedelta(minutes=RESTART_GRACE_MINUTES):
+        # 反映で見張り役を作り直した直後は、止まっていた分だけ遅れて見える。異常ではなく注意にとどめる
+        return {**result, "state": "warn",
+                "text": f"反映で見張り役を作り直したため、少しのあいだ止まっていた（{restarted_at:%H:%M} に起動）。次の判断の回で戻る"}
     if last is None or now - last > dt.timedelta(minutes=DECISION_STALE_MINUTES):
         return {**result, "state": "bad", "text": "判断の回が止まっている"}
     if last_real is None or now - last_real > dt.timedelta(minutes=AI_STALE_MINUTES if is_ai else DECISION_STALE_MINUTES):
@@ -138,7 +146,7 @@ def check_all(now: dt.datetime, *, watch: dict[str, Any], live_events: Sequence[
 
     # 判断する者
     for name in accounts:
-        h = decider_health(live_events, name, now, market_open=is_open)
+        h = decider_health(live_events, name, now, market_open=is_open, restarted_at=started)
         impact, action = "", ""
         if h["state"] == "bad" and h["text"].startswith("判断の回が止まっている"):
             impact = "新しく建てる・閉じる判断が出ない。建玉は GMOコイン側の損切り・利確で守られている"
