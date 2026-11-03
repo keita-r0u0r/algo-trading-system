@@ -644,12 +644,16 @@ def decider_settings() -> None:
     current = rt.load_settings()
     with st.container(border=True):
         st.markdown("**売買の作り（並べて比べる）**")
-        st.caption("OFF にした作りは新しく建てない（持っている建玉の決済は続ける）。"
+        st.caption("判断する者ごとに段階を選ぶ。新しい判断する者・決まりは「記録だけ」から始め、成績を見て「本番」に上げる。"
+                   "うまくいかなくなったら、反映し直さずに、ここで前の段階に戻す。止めた作りは新しく建てない（持っている建玉の決済は続ける）。"
                    "ハーネス＋決まりは、建てる・閉じるを決まりが決め、Jev か AI には「見送るか」だけを聞く。"
                    "向き・数量・損切りは変えさせない。変えると次の回（5分以内）から効く")
         with st.form("decider_settings_form"):
-            deciders = {name: st.toggle(label, value=current.enabled(name), key=f"decider-{name}")
-                        for name, label in fx_filter.SWITCHABLE.items()}
+            deciders = {}
+            for name, label in fx_filter.SWITCHABLE.items():
+                deciders[name] = st.selectbox(label, list(fx_filter.STAGES),
+                                              index=list(fx_filter.STAGES).index(current.stage(name)),
+                                              format_func=fx_filter.STAGES.get, key=f"decider-{name}")
             c1, c2, c3 = st.columns(3)
             mode = c1.selectbox("見送りの確認", list(fx_filter.MODES), index=list(fx_filter.MODES).index(current.filter.mode),
                                 format_func=fx_filter.MODES.get)
@@ -1371,7 +1375,7 @@ def live_decisions() -> None:
         "判断": vm.action_label(e.get("decision") or {}, h),
         "理由": vm.explain_decision(e, h),
         "見た数字": ", ".join(f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")),
-        "出どころ": source(e),
+        "出どころ": ("📝 記録だけ・" if e.get("shadow") else "") + source(e),
         "通ったか": "" if (e.get("decision") or {}).get("action") in ("hold", None)
         else ("通った" if e.get("approved") else f"通らなかった: {e.get('rejected')}"),
         "リスク": f"資金の{float((e.get('decision') or {}).get('risk_fraction') or (e.get('logic') or {}).get('risk_fraction') or 0):.1%}"
@@ -1456,6 +1460,20 @@ def compare_body() -> None:
         "平均の負け": st.column_config.NumberColumn(format="%+.0f 円")})
     st.caption("勝ち÷負けは、1回の平均の勝ちが平均の負けの何倍か。1を大きく超えるほど、勝率が低くても増える。"
                "乗った含み益を残せた割合は、含み益が20円以上まで乗った取引で、最大の含み益のうち確定できた割合")
+    from jqbt.application import fx_shadow
+    from jqbt.interfaces import fx_runtime as rt
+
+    shadow_log = rt.read_jsonl(rt.SHADOW_LOG)
+    if shadow_log:
+        st.markdown("**記録だけ（shadow）の段階の成績**（注文は出さず、もし建てていたらの結果）")
+        open_now = fx_shadow.book(shadow_log)
+        st.dataframe(pd.DataFrame([{"判断する者": vm.account_label(name), **{
+            "決済": r["trades"], "合計 pips": r["total_pips"], "合計 R": r["total_r"],
+            "勝率": f"{r['win_rate']:.0%}" if r["win_rate"] is not None else "", "勝ち÷負け": r["payoff"]},
+            "今の仮の建玉": f"{open_now[name].symbol} {'買い' if open_now[name].side > 0 else '売り'} {open_now[name].price}"
+            if name in open_now else ""}
+            for name in dict.fromkeys(e["account"] for e in shadow_log if e.get("account"))
+            for r in [fx_shadow.results(shadow_log, name)]]), hide_index=True, width="stretch")
     shadow = vm.filter_shadow_rows(events)
     if shadow:
         st.markdown("**Jev / AI の見送りの答えと、その取引の結果**（記録だけの答えも残す）")

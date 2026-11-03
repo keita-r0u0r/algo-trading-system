@@ -20,8 +20,8 @@ from pathlib import Path
 import httpx
 import pandas as pd
 
-from ..application import fx_calendar, fx_exits, fx_features, fx_filter, fx_jev, fx_setups, fx_sizing
-from ..application.fx_live_trade import Intent, LiveConfig, book_from_events
+from ..application import fx_calendar, fx_exits, fx_features, fx_filter, fx_jev, fx_setups, fx_shadow, fx_sizing
+from ..application.fx_live_trade import Intent, LiveConfig, book_from_events, exit_time_problem
 from ..application.fx_paper import (
     PaperAccount,
     PaperPosition,
@@ -992,7 +992,12 @@ def trade_live(ctx: "Context") -> bool:
     session.config = replace(session.config, max_units_by_account=tuple(
         (name, ctx.settings.sizing_for(name).max_units) for name in session.config.accounts))
     intents: list[Intent] = []
+    shadow_log = read_jsonl(SHADOW_LOG)
+    shadow_book = fx_shadow.book(shadow_log)
     for name in session.config.accounts:
+        if ctx.settings.stage(name) == "shadow":
+            trade_shadow(name, ctx, session, shadow_log, shadow_book)
+            continue
         view = live_view(name, session)
         switched_on = ctx.settings.enabled(name)
         if not switched_on and view.position is None:
@@ -1011,6 +1016,10 @@ def trade_live(ctx: "Context") -> bool:
             )
             if approved is not None and approved.action != "close" and not switched_on:
                 approved, rejected = None, "画面で止めている（新しく建てない。建玉の決済は続ける）"
+            if approved is not None and approved.action != "close":
+                problem = exit_time_problem(str(decision.get("exit_condition") or ""), decision.get("hold_minutes"), ctx.now)
+                if problem:
+                    approved, rejected = None, problem
             session.events.append({"kind": "live_decision", "at": ctx.now.isoformat(), "account": name,
                                    "decision": {k: v for k, v in decision.items() if k != "context"},
                                    "approved": approved is not None, "rejected": rejected,
@@ -1026,6 +1035,51 @@ def trade_live(ctx: "Context") -> bool:
     session.finish()
     maybe_propose_sizing(ctx, session)
     return True
+
+
+SHADOW_LOG = STATE / "fx_shadow.jsonl"
+
+
+def trade_shadow(name: str, ctx: "Context", session, shadow_log: list[dict], shadow_book: dict) -> None:
+    """段階が「記録だけ」の判断する者: 実際の口座と同じ材料・同じ枠で判断し、注文は出さずに仮の建玉で記録する。"""
+    new: list[dict] = []
+    p = shadow_book.get(name)
+    if p is not None:
+        hit = fx_shadow.stop_or_take(p, ctx.bars.get(p.symbol))
+        if hit:
+            new.append(hit)
+            p = None
+    position = None if p is None else PaperPosition(p.symbol, p.side * p.units, p.price, p.stop, p.take, p.opened_at,
+                                                    "記録だけの仮の建玉")
+    equity = session.equity
+    view = PaperAccount(name, equity, equity, position, equity=equity, day_start_equity=equity)
+    for decision, reason, extra in decide(name, view, ctx, session.log + session.events + shadow_log + new, live=True):
+        approved, rejected = check(
+            decision, ctx.live_frame, equity=equity, holding=position.symbol if position else None,
+            spread_pips={s: q["spread"] for s, q in ctx.quotes.items()},
+            prices={s: q["ask"] for s, q in ctx.quotes.items()}, instruments=ctx.insts, halted=False)
+        if approved is not None and approved.action != "close":
+            units = min(abs(approved.units), session.config.units_cap(name)) * (1 if approved.units > 0 else -1)
+            if abs(units) < session.config.min_units:
+                approved, rejected = None, "数量が最小の注文数量に届かない"
+        session.events.append({"kind": "live_decision", "at": ctx.now.isoformat(), "account": name, "shadow": True,
+                               "decision": {k: v for k, v in decision.items() if k != "context"},
+                               "approved": approved is not None, "rejected": rejected,
+                               **{k: v for k, v in extra.items() if k in ("logic", "model", "prompt_version",
+                                                                         "confidence", "reused", "error", "note",
+                                                                         "trigger")}})
+        if approved is None:
+            continue
+        quote = ctx.quotes.get(approved.symbol or (position.symbol if position else ""))
+        if approved.action == "close" and p is not None and quote:
+            new.append(fx_shadow.close_event(p, quote["bid"] if p.side > 0 else quote["ask"], ctx.now, reason or "判断で閉じた"))
+            p = position = None
+        elif approved.action != "close" and p is None and quote:
+            new.append(fx_shadow.open_event(name, approved.symbol, units, approved.stop_pips, approved.take_pips, quote,
+                                            ctx.now, decision))
+    for row in new:
+        append_jsonl(SHADOW_LOG, row)
+    shadow_log.extend(new)
 
 
 def live_view(name: str, session) -> PaperAccount:

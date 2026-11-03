@@ -5,7 +5,9 @@ def test_settings_default_and_bad_values_fall_back():
     s = ff.parse_settings(None)
     assert s.enabled("ai") and s.enabled("harness") and s.filter.mode == "shadow" and s.filter.provider == "jev"
     s = ff.parse_settings({"deciders": {"ai": False}, "filter": {"mode": "nope", "provider": "x", "threshold": "y"}})
-    assert not s.enabled("ai") and s.enabled("harness")
+    assert not s.enabled("ai") and s.enabled("harness") and s.stage("harness") == "live"
+    s2 = ff.parse_settings({"deciders": {"jev": "shadow", "harness": "nope", "ai": True}})
+    assert s2.stage("jev") == "shadow" and s2.enabled("jev") and s2.stage("harness") == "live" and s2.stage("ai") == "live"
     assert (s.filter.mode, s.filter.provider, s.filter.threshold) == ("shadow", "jev", 0.6)
     assert ff.parse_settings({"filter": {"threshold": 5}}).filter.threshold == 0.95
     assert ff.parse_settings(s.to_dict()) == s

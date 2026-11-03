@@ -1,7 +1,7 @@
 # 仮想環境（.venv）があればその Python を使う
 PY := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
-.PHONY: install test fetch compare run holdout walkforward gui docker-build docker-test docker-gui infra-init infra-plan infra-apply image deploy cloud-seed paper verify health
+.PHONY: install test fetch compare run holdout walkforward gui docker-build docker-test docker-gui infra-init infra-plan infra-apply image deploy cloud-seed paper verify health rollback
 
 install:
 	$(PY) -m pip install -e ".[dev]"
@@ -87,6 +87,16 @@ image:
 # 反映したあとの確認（新しい版の見張り役が、AI・ロジックで判断して実際の口座に届くまで待つ）。V= で版を指定
 verify:
 	$(PY) scripts/fx_verify.py --version $${V:-$$(git rev-parse --short HEAD)}
+
+# 前の版に戻す（リリースログで確認が通った、今より前のいちばん新しい版。TO= で指定）。
+# 計画（tofu plan）を見せて、y を押したときだけ反映し、そのあと確認する。手順と、戻す前に確かめることは docs/release.md
+rollback:
+	@$(PY) scripts/fx_rollback.py $(if $(TO),--to $(TO))
+	@V=$$($(PY) scripts/fx_rollback.py --pick $(if $(TO),--to $(TO))) && \
+	$(TOFU) plan -out=rollback.tfplan -var image_tag=$$V -var app_version=$$V && \
+	read -p "版 $$V に戻します。よいですか [y/N] " answer && [ "$$answer" = y ] && \
+	$(TOFU) apply rollback.tfplan && rm -f infra/rollback.tfplan && \
+	$(PY) scripts/fx_verify.py --version $$V; rm -f infra/rollback.tfplan
 
 # 今の健康診断だけ
 health:

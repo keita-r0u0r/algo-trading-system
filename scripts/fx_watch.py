@@ -55,7 +55,7 @@ class Cloud:
         self.bucket = bucket
         self.files = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
                       for n in ("fx_live.jsonl", "ai_usage.jsonl", "fx_calendar.json", "jev_usage.jsonl",
-                                "fx_sizing_proposals.jsonl")]
+                                "fx_sizing_proposals.jsonl", "fx_shadow.jsonl")]
         self.read_only = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
                           for n in ("ai_settings.json", "ai_models.json", "fx_positions.json", "fx_notes.jsonl", "fx_settings.json")]
         self.flags = [SyncedFlag(self.http, bucket, "state/KILL_fx_live", state_dir / "KILL_fx_live")]

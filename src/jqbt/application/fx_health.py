@@ -160,6 +160,16 @@ def check_all(now: dt.datetime, *, watch: dict[str, Any], live_events: Sequence[
             action = "続くようなら Claude に伝える"
         findings.append(Finding(name, h["state"], h["text"], impact, action))
 
+    # 管理していない建玉（前の版に戻したときなど、この版が知らない判断する者が建てたもの）
+    from .fx_live_trade import book_from_events
+
+    orphans = [p for p in book_from_events(list(live_events)).values() if p.account not in accounts]
+    if orphans:
+        names = "、".join(f"{p.account}（{p.symbol} {p.side} {p.size}通貨）" for p in orphans)
+        findings.append(Finding("管理していない建玉", "bad", f"今の版が知らない判断する者の建玉がある: {names}",
+                                "この建玉は誰も判断しない（閉じない）。GMOコイン側の損切り・利確だけが効いている",
+                                "建てた版に戻すか、GMOコインのアプリで決済する。わからなければ Claude に伝える"))
+
     # 口座
     if not live_enabled:
         findings.append(Finding("自動売買", "warn", "有効になっていない（fx_live_enabled）", "実際の売買をしない",

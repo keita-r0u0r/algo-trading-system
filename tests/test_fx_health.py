@@ -102,3 +102,20 @@ def test_ai_gap_right_after_restart_is_only_a_warning():
     assert h["state"] == "warn" and "反映" in h["text"]
     late = decider_health(events, "ai", now, restarted_at=dt.datetime(2026, 11, 3, 22, 0, tzinfo=JST))
     assert late["state"] == "bad"  # 起動から10分を超えても戻らなければ異常
+
+
+def test_positions_of_unknown_deciders_are_flagged():
+    import datetime as dt
+
+    from jqbt.application.fx_health import check_all
+
+    jst = dt.timezone(dt.timedelta(hours=9))
+    events = [{"kind": "live_open", "account": "jev", "symbol": "USD_JPY", "side": "BUY", "size": 300,
+               "position_id": 5, "at": "2026-11-04T09:00:00+09:00"}]
+    findings = check_all(dt.datetime(2026, 11, 4, 10, tzinfo=jst), watch={}, live_events=events, accounts=["ai"],
+                         live_enabled=True, killed=False, paper_paused=False)
+    [f] = [f for f in findings if f.name == "管理していない建玉"]
+    assert f.state == "bad" and "jev" in f.text
+    findings = check_all(dt.datetime(2026, 11, 4, 10, tzinfo=jst), watch={}, live_events=events, accounts=["ai", "jev"],
+                         live_enabled=True, killed=False, paper_paused=False)
+    assert not [f for f in findings if f.name == "管理していない建玉"]
