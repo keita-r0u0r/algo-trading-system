@@ -68,3 +68,15 @@ def test_carry_scale_grows_with_trend(last, expected):
     average = sum(closes) / 50
     assert rt.carry_scale(closes) == pytest.approx(min(1.0, max(rt.CARRY_MIN_SCALE, (last / average - 1) / 0.02)))
     assert rt.carry_scale(closes) == pytest.approx(expected, abs=0.02)
+
+
+def test_position_numbers_are_precomputed_for_ai():
+    from jqbt.application.fx_paper import PaperPosition
+
+    long = PaperPosition("USD_JPY", 100, 157.876, 157.676, None, "2026-11-03T00:55:00+09:00", "")
+    n = rt.position_numbers(long, {"bid": 157.918, "ask": 157.922})
+    assert n["unrealized_pips"] == 4.2 and n["unrealized_yen"] == 4.2  # 100通貨なら 1 pip = 1円
+    assert n["pips_to_stop"] == 24.2 and n["yen_per_pip"] == 1.0
+    short = PaperPosition("EUR_JPY", -1000, 176.737, 177.0, 176.5, "", "")
+    s = rt.position_numbers(short, {"bid": 176.70, "ask": 176.717})
+    assert s["unrealized_pips"] == 2.0 and s["unrealized_yen"] == 20.0 and s["pips_to_take"] == 21.7
