@@ -52,8 +52,9 @@ class Sizing:
 
 
 #: 判断する者ごとの数量の上限の既定（ハーネス＋決まりは、比べ始めは小さく）
-DEFAULT_SIZING = {"ai": Sizing(1_000, 0.05), "carry_trend_USD_JPY": Sizing(1_000, 0.05), "harness": Sizing(300, 0.01),
-                  "jev": Sizing(300, 0.01)}
+DEFAULT_SIZING = {"ai": Sizing(1_000, 0.05),
+                  **{f"carry_trend_{s}": Sizing(1_000, 0.05) for s in ("USD_JPY", "EUR_JPY", "GBP_JPY", "AUD_JPY")},
+                  "harness": Sizing(300, 0.01), "jev": Sizing(300, 0.01)}
 
 
 def clamp_sizing(max_units: Any, max_risk: Any, default: Sizing) -> Sizing:
