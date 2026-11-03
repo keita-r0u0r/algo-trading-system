@@ -89,3 +89,16 @@ def test_calendar_stale_is_a_warning():
     fresh = check_all(now, **common, calendar={"fetched_at": "2026-11-04T14:30:00+09:00"})
     assert [f.state for f in fresh if f.name == "経済指標の予定"] == ["ok"]
     assert not [f for f in check_all(now, **common) if f.name == "経済指標の予定"]
+
+
+def test_ai_gap_right_after_restart_is_only_a_warning():
+    from jqbt.application.fx_health import decider_health
+
+    now = dt.datetime(2026, 11, 3, 22, 20, tzinfo=JST)
+    events = [{"kind": "live_decision", "account": "ai", "model": "m", "at": "2026-11-03T21:56:00+09:00"},
+              {"kind": "live_decision", "account": "ai", "note": "呼ばなかった", "at": "2026-11-03T22:06:00+09:00"}]
+    assert decider_health(events, "ai", now)["state"] == "bad"
+    h = decider_health(events, "ai", now, restarted_at=dt.datetime(2026, 11, 3, 22, 18, tzinfo=JST))
+    assert h["state"] == "warn" and "反映" in h["text"]
+    late = decider_health(events, "ai", now, restarted_at=dt.datetime(2026, 11, 3, 22, 0, tzinfo=JST))
+    assert late["state"] == "bad"  # 起動から10分を超えても戻らなければ異常

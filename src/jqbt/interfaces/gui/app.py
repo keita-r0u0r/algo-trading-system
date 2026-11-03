@@ -1070,7 +1070,9 @@ def live_overview() -> None:
         for name in LiveConfig().accounts:
             e, holding = latest.get(name, ({}, None))
             d = e.get("decision") or {}
-            health = vm.decider_health(events, name, now_jst, market_open=market_open)
+            started = watcher_state().get("started_at")
+            health = vm.decider_health(events, name, now_jst, market_open=market_open,
+                                       restarted_at=dt.datetime.fromisoformat(started) if started else None)
             if health["state"] == "bad":
                 st.error(f"{vm.account_label(name)}: {health['text']}")
             held = owners_now.get(vm.account_label(name))
