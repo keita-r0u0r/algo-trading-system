@@ -803,7 +803,9 @@ def live_overview() -> None:
         else:
             st.caption("持っていません")
     with st.container(border=True):
-        st.markdown("**判断する者ごとの今の状態**（15分ごとの回で判断。見送りも含む）")
+        st.markdown("**判断する者ごとの今の状態**（見張り役が5分ごと・急変のときに判断。AI は15分ごと・急変のとき）")
+        now_jst = dt.datetime.now(JST)
+        market_open = bool(prices)
         latest: dict[str, dict] = {}
         for e in events:
             if e.get("kind") == "live_decision":
@@ -816,8 +818,14 @@ def live_overview() -> None:
             action = {"hold": "見送り・持ち続ける", "close": "閉じる", "open_long": "買う", "open_short": "売る"}.get(
                 d.get("action"), d.get("action") or "—")
             held = owners_now.get(vm.account_label(name))
+            health = vm.decider_health(events, name, now_jst, market_open=market_open)
+            if health["state"] == "bad":
+                st.error(f"{vm.account_label(name)}: {health['text']}")
             rows.append({
                 "判断する者": vm.account_label(name),
+                "動き": {"ok": "🟢 ", "warn": "🟡 ", "bad": "🔴 "}.get(health["state"], "⚪ ") + health["text"],
+                "最後に実際に判断": health["last_real"].strftime("%m-%d %H:%M") if health["last_real"] else "—",
+                "直近1時間": f"{health['real_1h']}/{health['rounds_1h']}回" + (f"・失敗{health['failed_1h']}" if health["failed_1h"] else ""),
                 "最後の判断": e.get("at", "")[5:16].replace("T", " ") or "—",
                 "判断": action + ("" if not d or e.get("approved") or d.get("action") == "hold"
                                  else f"（却下: {e.get('rejected')}）"),
@@ -895,16 +903,44 @@ def page_decisions() -> None:
 def live_decisions() -> None:
     events = [e for e in live_log() if e.get("kind") == "live_decision"]
     if not events:
-        st.info("まだありません（15分ごとの回で記録します）", icon=":material/hourglass_empty:")
+        st.info("まだありません（見張り役が5分ごと・急変のときに記録します）", icon=":material/hourglass_empty:")
         return
+
+    def source(e: dict) -> str:
+        """この判断が、誰がどう出したものか（AI が実際に考えた／既定の答え／ロジック）。"""
+        if e.get("error"):
+            return f"🔴 AI を呼べなかった（{e['error'][:60]}）"
+        if e.get("model"):
+            return "🟢 AI が判断（使い回し）" if e.get("reused") else f"🟢 AI が判断（{e['model'].split('/')[-1]}）"
+        if e.get("logic"):
+            return f"🟢 ロジック（{(e['logic'] or {}).get('version', '')}）"
+        return "⚪ " + (e.get("note") or "AI を呼ぶ回ではない・記録なし")
+
+    only = st.segmented_control("表示", ["すべて", "AI が実際に判断した回だけ", "見送り以外"], default="すべて",
+                                label_visibility="collapsed")
+    if only == "AI が実際に判断した回だけ":
+        events = [e for e in events if e.get("model")]
+    elif only == "見送り以外":
+        events = [e for e in events if (e.get("decision") or {}).get("action") not in ("hold", None)]
     st.dataframe(pd.DataFrame([{
         "時刻": e["at"][5:16].replace("T", " "), "判断する者": vm.account_label(e.get("account", "")),
+        "出どころ": source(e),
         "判断": (e.get("decision") or {}).get("action"), "通貨": (e.get("decision") or {}).get("symbol", ""),
+        "リスク%": f"{float((e.get('decision') or {}).get('risk_fraction') or (e.get('logic') or {}).get('risk_fraction') or 0):.1%}"
+        if (e.get("decision") or {}).get("action", "").startswith("open") else "",
+        "自信": (e.get("decision") or {}).get("confidence", "") or "",
         "結果": "通過" if e.get("approved") else (e.get("rejected") or "見送り"),
         "根拠・見た数字": (e.get("decision") or {}).get("reasoning", "")
         or ", ".join(f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")),
-        "使い回し": "○" if e.get("reused") else "",
+        "気にしていること": (e.get("decision") or {}).get("risks", "") or "",
+        "起こした理由": e.get("trigger", "") or "",
     } for e in reversed(events)][:300]), hide_index=True, width="stretch")
+    with st.expander("ロジックの決まり（機械の判断）"):
+        from jqbt.interfaces.fx_runtime import RULES, RULES_VERSION
+
+        st.caption(f"版: {RULES_VERSION}")
+        for key, text in RULES.items():
+            st.markdown(f"- **{vm.account_label(key) if key != 'carry_trend' else '金利差＋流れ'}**: {text}")
 
 
 def paper_decisions() -> None:

@@ -60,3 +60,38 @@ def test_fill_rows_show_adverse_slippage_as_positive():
     assert rows[0]["始値とのずれ(%)"] == 1.0
     assert rows[1]["始値とのずれ(%)"] == 1.0
     assert rows[2]["始値とのずれ(%)"] is None
+
+
+# --- 判断する者の動き具合 -----------------------------------------------------------
+def _decision(at, account="ai", **extra):
+    return {"kind": "live_decision", "at": at.isoformat(), "account": account, "decision": {"action": "hold"}, **extra}
+
+
+def test_decider_health_tells_real_ai_from_default_hold():
+    import datetime as dt
+
+    from jqbt.interfaces.viewmodels import decider_health
+
+    now = dt.datetime(2026, 11, 3, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
+    m = dt.timedelta(minutes=1)
+    real = [_decision(now - 10 * m, model="gemini")]
+    assert decider_health(real + [_decision(now - 5 * m)], "ai", now)["state"] == "ok"
+    # 「持ち続ける」は並んでいても、AI が実際には呼べていない
+    stale = [_decision(now - 60 * m, model="gemini")] + [_decision(now - k * m, error="PermissionDenied") for k in (15, 10, 5)]
+    health = decider_health(stale, "ai", now)
+    assert health["state"] == "bad" and "AI を呼べていない" in health["text"] and "PermissionDenied" in health["text"]
+    assert health["failed_1h"] == 3
+    assert decider_health([_decision(now - 30 * m, model="gemini")], "ai", now)["text"] == "判断の回が止まっている"
+    assert decider_health([], "ai", now, market_open=False)["state"] == "info"
+
+
+def test_decider_health_for_rule_logic():
+    import datetime as dt
+
+    from jqbt.interfaces.viewmodels import decider_health
+
+    now = dt.datetime(2026, 11, 3, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
+    ok = [_decision(now - dt.timedelta(minutes=3), account="carry_trend_USD_JPY", logic={"target": 1})]
+    assert decider_health(ok, "carry_trend_USD_JPY", now)["state"] == "ok"
+    broken = [_decision(now - dt.timedelta(minutes=3), account="carry_trend_USD_JPY")]
+    assert "ロジック" in decider_health(broken, "carry_trend_USD_JPY", now)["text"]
