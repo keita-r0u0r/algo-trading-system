@@ -7,6 +7,8 @@ AI を毎回呼ぶのは高く遅いので、見張りは機械的に行い、�
   * 急変: ある通貨ペアが ``window_minutes`` 分で ``move_pips`` 以上動いた
   * 建玉が損切り・利確に近づいた: あと ``near_pips`` 以内
   * 建玉の見直し（実際の建玉）: 含み損が損切りまでの1/3・2/3、含み益が利確までの1/3・2/3に達した（線ごとに1回）
+  * 予想から外れた（建てたときの予想 thesis がある建玉）: 根拠が崩れる値段（invalidation_price）を越えた、
+    保有の目安の半分たっても目標（target_price）までの1/4も進んでいない、保有の目安が過ぎても目標に届いていない
   * 含み益の目減り: 含み益の最高が ``giveback_min_pips`` 以上になったあと、その ``giveback_fraction`` を失った
     （せっかくの利益が、知らないうちに消えないように）
   * 市場の時間帯の切り替わり: ``session_times``（日本時間。ロンドン・ニューヨークの始まり）
@@ -108,6 +110,9 @@ def reason_to_wake(
         review = review_reason(p, history.last(p["symbol"]), config, fired_sessions)
         if review:
             return review
+        thesis = thesis_reason(p, history.last(p["symbol"]), now, config, fired_sessions)
+        if thesis:
+            return thesis
         giveback = giveback_reason(p, history.last(p["symbol"]), config, peaks or {}, fired_sessions)
         if giveback:
             return giveback
@@ -130,6 +135,39 @@ def unrealized_pips(p: dict, price: float | None, config: WatchConfig) -> float 
     if price is None or side is None or p.get("price") is None:
         return None
     return side * (price - p["price"]) / config.pip
+
+
+def thesis_check(p: dict, price: float | None, now: dt.datetime, config: WatchConfig) -> list[tuple[str, bool]]:
+    """建てたときの予想（根拠が崩れる値段・目標・保有の目安）に照らした確認。(名前, 外れたか) の並び。"""
+    t = p.get("thesis") or {}
+    side = {"BUY": 1, "SELL": -1}.get(p.get("side", ""))
+    if price is None or side is None or p.get("price") is None:
+        return []
+    checks = []
+    if t.get("invalidation_price"):
+        checks.append((f"根拠が崩れる値段（{t['invalidation_price']}）を越えた", side * (price - t["invalidation_price"]) <= 0))
+    try:
+        opened = dt.datetime.fromisoformat(str(p.get("opened_at")))
+    except ValueError:
+        opened = None
+    target, hold = t.get("target_price"), t.get("hold_minutes")
+    if target and hold and opened and side * (target - p["price"]) > 0:
+        elapsed = (now - opened).total_seconds() / 60 / hold
+        progress = side * (price - p["price"]) / (side * (target - p["price"]))
+        checks.append((f"保有の目安（{hold:.0f}分）の半分たっても、目標（{target}）までの{progress:.0%}しか進んでいない",
+                       elapsed >= 0.5 and progress < 0.25))
+        checks.append((f"保有の目安（{hold:.0f}分）が過ぎても、目標（{target}）に届いていない", elapsed >= 1 and progress < 1))
+    return checks
+
+
+def thesis_reason(p: dict, price: float | None, now: dt.datetime, config: WatchConfig, fired: set[str]) -> str:
+    """予想から外れたら、その理由（確認ごとに1回）。"""
+    for label, off in thesis_check(p, price, now, config):
+        key = f"thesis {position_key(p)} {label.split('（')[0]}"
+        if off and key not in fired:
+            fired.add(key)
+            return f"予想から外れた: {p['account']} の建玉が{label}。根拠と予想が生きているか判断し直す"
+    return ""
 
 
 def giveback_reason(p: dict, price: float | None, config: WatchConfig, peaks: dict[str, float], fired: set[str]) -> str:
@@ -199,6 +237,7 @@ def watch_snapshot(now: dt.datetime, history: PriceHistory, positions: list[dict
             if peak is not None and peak >= config.giveback_min_pips:
                 row["peak_pips"] = round(peak, 1)
                 row["giveback_at_pips"] = round(peak * (1 - config.giveback_fraction), 1)
+        row["thesis"] = p.get("thesis") or None
         row["reviews"] = [{"label": label, "price": round(level, 3),
                            "done": f"review {p.get('account')} {p.get('opened_at')} {label}" in fired_sessions}
                           for label, level in review_levels(p, config)]

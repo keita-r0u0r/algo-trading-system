@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 import pandas as pd
 
-from ..application import fx_calendar
+from ..application import fx_calendar, fx_features
 from ..application.fx_live_trade import Intent, LiveConfig, book_from_events
 from ..application.fx_paper import (
     PaperAccount,
@@ -234,20 +234,24 @@ def plan_when_opened(name: str, position, events: list[dict], now: dt.datetime) 
                     "minutes_held": int((now - start).total_seconds() // 60),
                     "reasoning": d.get("reasoning", ""), "exit_condition": d.get("exit_condition", ""),
                     "hold_minutes": d.get("hold_minutes"), "confidence": d.get("confidence"),
-                    "stop_pips": d.get("stop_pips"), "take_pips": d.get("take_pips")}
+                    "stop_pips": d.get("stop_pips"), "take_pips": d.get("take_pips"),
+                    "setup": d.get("setup"), "invalidation_price": d.get("invalidation_price") or None,
+                    "target_price": d.get("target_price") or None}
     return None
 
 
 def ai_context(account: PaperAccount, frame: TradingFrame, quotes: dict, bars: dict, now: dt.datetime,
-               events: list[dict], today_rates: dict) -> dict:
+               events: list[dict], today_rates: dict, daily: dict | None = None) -> dict:
     p = account.position
     closes = [e for e in events if e.get("kind") == "close" and e.get("account") == account.name][-10:]
     market = {
         "now_jst": now.strftime("%Y-%m-%d %H:%M (%a)"),
         "rates_2y_percent": today_rates,
         "symbols": {},
-        "note": "hourly_close は完成した1時間足の仲値の終値（古い順、直近48本）。recent_5min_close は直近2時間の"
-                "5分足の終値（古い順、24本）。daily_range_pips は営業日ごとの値幅。円の通貨ペアでは 1 pip = 0.01円。"
+        "note": "features は1分足から計算した特徴量（application/fx_features.py）。summary に同じ数字の文がある。"
+                "moves.*.noise_ratio は、その長さの動きがふだんの揺れの何倍か（1未満は揺れの範囲で、流れの根拠にならない）。"
+                "features.recent_1min_close は直近30分の1分足の終値。hourly_close は完成した1時間足の終値（直近24本）。"
+                "recent_5min_close は直近2時間の5分足の終値（24本）。daily_range_pips は営業日ごとの値幅。円の通貨ペアでは 1 pip = 0.01円。"
                 "建玉の含み損益・損切りまでの距離は account.position に計算済み（自分で計算し直さない）",
     }
     for sym in frame.symbols:
@@ -257,7 +261,8 @@ def ai_context(account: PaperAccount, frame: TradingFrame, quotes: dict, bars: d
         sessions = bars[sym].groupby("session")
         market["symbols"][sym] = {
             "bid": quotes[sym]["bid"], "ask": quotes[sym]["ask"], "spread_pips": round(quotes[sym]["spread"], 2),
-            "hourly_close": [round(float(v), 3) for v in h["close"].tail(48)],
+            "features": fx_features.market_features(bars[sym], now, daily_closes=(daily or {}).get(sym)),
+            "hourly_close": [round(float(v), 3) for v in h["close"].tail(24)],
             "recent_5min_close": [round(float(v), 3) for v in
                                   bars[sym]["close"].resample("5min").last().dropna().tail(24)],
             "daily_range_pips": [round(float((g["high"].max() - g["low"].min()) / 0.01), 1) for _, g in sessions][-5:],
@@ -310,6 +315,8 @@ class Context:
     ai_last: dt.datetime | None = None
     #: 経済指標の予定（application/fx_calendar.py。取れなければ空）
     calendar: list = field(default_factory=list)
+    #: 通貨ペアごとの日足の終値（特徴量の日足の部分に使う。1日1回だけ取る）
+    daily: dict = field(default_factory=dict)
 
 
 def frame_for(name: str, ctx: Context) -> TradingFrame:
@@ -338,7 +345,7 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *
         if key in ctx.ai_cache:
             data, extra = ctx.ai_cache[key]
             return [(data, f"AI（同じ状態の判断を使い回し）: {data.get('reasoning', '')}", {**extra, "reused": True})]
-        context = ai_context(account, frame, quotes, bars, now, events, ctx.today_rates)
+        context = ai_context(account, frame, quotes, bars, now, events, ctx.today_rates, ctx.daily)
         if live:
             context["frame"]["max_units"] = LiveConfig().max_units
             context["goal"] = ("実際の口座。利用者の目標は1か月で資金1.5倍。数量は risk_fraction（枠の上限まで）で決まる。"
@@ -454,10 +461,27 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
     return Context(api=api, now=now, frame=frame, carry_frame=carry_frame, live_frame=live_frame, insts=insts, quotes=quotes, bars=bars,
                    ai=ai, today_rates=rates_summary(now.date()) if ai is not None else {},
                    short=short_rates(now.date()), ai_cache={}, trigger=trigger,
-                   ai_last=ai_last_called(), ai_due=ai_due(trigger), calendar=load_calendar(now))  # 前回の時刻は、ai_due が書き換える前に読む
+                   ai_last=ai_last_called(), ai_due=ai_due(trigger), calendar=load_calendar(now),
+                   daily=daily_for_features(api, now) if ai is not None else {})  # 前回の時刻は、ai_due が書き換える前に読む
 
 
 CALENDAR = STATE / "fx_calendar.json"
+_DAILY: dict[tuple[str, dt.date], list[float]] = {}
+
+
+def daily_for_features(api: GmoFxClient, now: dt.datetime) -> dict[str, list[float]]:
+    """通貨ペアごとの日足の終値（直近60日）。1日1回だけ取る（見張り役は動き続けるので、覚えておく）。"""
+    out = {}
+    for sym in SYMBOLS:
+        key = (sym, now.date())
+        if key not in _DAILY:
+            try:
+                _DAILY[key] = daily_closes(api, sym, now)[-60:]
+            except Exception as exc:  # noqa: BLE001  日足が無くても、特徴量の残りで判断する
+                print(f"日足を取れなかった（{sym}）: {type(exc).__name__}: {exc}", flush=True)
+                continue
+        out[sym] = _DAILY[key]
+    return out
 #: 利用者が画面から残したメモ（AI の判断に、期限まで渡す）。{"kind": "note", id, at, text, until} と {"kind": "delete", id}
 NOTES = STATE / "fx_notes.jsonl"
 
@@ -609,13 +633,29 @@ def ai_due(trigger: str) -> bool:
     return due
 
 
+def live_watch_rows(events: list[dict]) -> list[dict]:
+    """見張り役に渡す実際の建玉（建値・向き・損切り・利確と、建てたときの予想）。"""
+    now = dt.datetime.now(JST)
+    rows = []
+    for p in book_from_events(events).values():
+        plan = dict(plan_when_opened(p.account, p, events, now) or {})
+        side = 1 if p.side == "BUY" else -1
+        if p.price is not None:  # 向きと合わない予想は使わない（買いなら、崩れる値段は建値より下・目標は上）
+            if plan.get("invalidation_price") and side * (p.price - plan["invalidation_price"]) <= 0:
+                plan["invalidation_price"] = None
+            if plan.get("target_price") and side * (plan["target_price"] - p.price) <= 0:
+                plan["target_price"] = None
+        rows.append({"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take,
+                     "price": p.price, "side": p.side, "opened_at": p.opened_at,
+                     "thesis": {k: plan.get(k) for k in ("invalidation_price", "target_price", "hold_minutes", "setup")}})
+    return rows
+
+
 def write_positions(accounts: dict[str, PaperAccount]) -> None:
     """見張り役のための、今の建玉の要約（ペーパーと実際）。"""
     rows = [{"venue": "paper", "account": a.name, "symbol": a.position.symbol, "stop": a.position.stop,
              "take": a.position.take} for a in accounts.values() if a.position is not None]
-    rows += [{"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take,
-              "price": p.price, "side": p.side, "opened_at": p.opened_at}
-             for p in book_from_events(fx_live_log.load()).values()]
+    rows += live_watch_rows(fx_live_log.load())
     try:
         POSITIONS.write_text(json.dumps({"at": dt.datetime.now(JST).isoformat(timespec="seconds"), "positions": rows},
                                         ensure_ascii=False), encoding="utf-8")

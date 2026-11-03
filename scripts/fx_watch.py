@@ -168,7 +168,6 @@ class ScalpPaper:
 
 def current_positions(state_dir: Path) -> list[dict]:
     """見張る建玉: ペーパーの建玉（ジョブが書く要約）と、実際の建玉（この見張り役の記録）。"""
-    from jqbt.application.fx_live_trade import book_from_events
     from jqbt.infrastructure import fx_live_log
 
     try:
@@ -176,10 +175,9 @@ def current_positions(state_dir: Path) -> list[dict]:
     except (OSError, ValueError):
         summary = []
     paper = [p for p in summary if p.get("venue") == "paper"]
-    live = [{"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take,
-             "price": p.price, "side": p.side, "opened_at": p.opened_at}
-            for p in book_from_events(fx_live_log.load()).values()]
-    return paper + live
+    from jqbt.interfaces.fx_runtime import live_watch_rows
+
+    return paper + live_watch_rows(fx_live_log.load())
 
 
 def live_cycle(cloud: Cloud | None, reason: str) -> tuple[str, bool]:

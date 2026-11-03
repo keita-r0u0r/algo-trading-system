@@ -60,11 +60,19 @@ def upcoming(events: Iterable[EconEvent], now: dt.datetime, symbols: Iterable[st
     for e in events:
         if e.currency not in wanted or not now - behind <= e.at <= now + ahead:
             continue
+        minutes = round((e.at - now).total_seconds() / 60)
         rows.append({"at_jst": e.at.astimezone(JST).strftime("%m-%d %H:%M"),
-                     "minutes_from_now": round((e.at - now).total_seconds() / 60),
+                     "minutes_from_now": minutes, "when": _when(minutes),
                      "currency": e.currency, "title": e.title, "impact": IMPACT_LABELS[e.impact],
                      "forecast": e.forecast, "previous": e.previous})
     return rows
+
+
+def _when(minutes: int) -> str:
+    """「あと2時間22分」「15分前に発表済み」。AI が時刻を読み違えないように、文でも渡す。"""
+    span = abs(minutes)
+    text = f"{span // 60}時間{span % 60}分" if span >= 60 else f"{span}分"
+    return f"あと{text}" if minutes >= 0 else f"{text}前に発表済み"
 
 
 def quiet_reason(events: Iterable[EconEvent], symbol: str, at: dt.datetime) -> str | None:

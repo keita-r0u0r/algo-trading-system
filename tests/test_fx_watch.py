@@ -109,3 +109,17 @@ def test_small_gains_do_not_trigger_giveback():
     peaks: dict[str, float] = {}
     h = gbp([(at(21, 32), 212.25), (at(21, 33), 212.22)])  # 最高 +3.3 pips（5 pips 未満）
     assert reason_to_wake(at(21, 33), h, [LONG], CFG, last_wake=None, fired_sessions=set(), peaks=peaks) == ""
+
+
+def test_thesis_invalidation_and_slow_progress():
+    pos = {**LONG, "thesis": {"invalidation_price": 212.10, "target_price": 212.517, "hold_minutes": 60}}
+    fired: set[str] = set()
+    h = gbp([(at(21, 30), 212.15)])  # 根拠が崩れる値段の手前。損切りまでの1/3（-6.7）に届かない -6.7 pips
+    assert wake(at(21, 30), h, [pos], fired=fired) == ""
+    h.add("GBP_JPY", at(21, 31), 212.099)
+    reasons = [wake(at(21, 31), h, [pos], fired=fired) for _ in range(3)]
+    assert any(r.startswith("予想から外れた: ai の建玉が根拠が崩れる値段（212.1）を越えた") for r in reasons)
+    # 目標まで 30 pips。30分（半分）たって +3 pips（10%）なら遅い
+    slow = {**LONG, "opened_at": "2026-11-03T21:00:00+09:00", "thesis": {"target_price": 212.517, "hold_minutes": 60}}
+    h2 = gbp([(at(21, 31), 212.247)])
+    assert "半分たっても" in wake(at(21, 31), h2, [slow], fired=set())
