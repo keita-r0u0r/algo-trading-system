@@ -107,6 +107,11 @@ def reason_to_wake(
             if level is not None and abs(price - level) / config.pip <= config.near_pips:
                 return f"{p['account']} の建玉が{label}（{level}）まで {abs(price - level) / config.pip:.1f} pips"
     for p in positions:
+        if p.get("managed") == "rules":  # 決まりが決済を持つ建玉は、利益を守る線だけ見る（AI に考え直させない）
+            reason = exit_level_reason(p, history.last(p["symbol"]), fired_sessions)
+            if reason:
+                return reason
+            continue
         review = review_reason(p, history.last(p["symbol"]), config, fired_sessions)
         if review:
             return review
@@ -184,6 +189,18 @@ def giveback_reason(p: dict, price: float | None, config: WatchConfig, peaks: di
     return ""
 
 
+def exit_level_reason(p: dict, price: float | None, fired: set[str]) -> str:
+    """決まりの「利益を守る線」（``exit_level``）を割ったら、その理由（線ごとに1回）。"""
+    level, side = p.get("exit_level"), {"BUY": 1, "SELL": -1}.get(p.get("side", ""))
+    if price is None or level is None or side is None:
+        return ""
+    key = f"exit {p.get('account')} {p.get('opened_at')} {level}"
+    if side * (price - level) <= 0 and key not in fired:
+        fired.add(key)
+        return f"決まりの決済の線: {p['account']} の建玉が利益を守る線（{level}）を割った"
+    return ""
+
+
 def review_levels(p: dict, config: WatchConfig) -> list[tuple[str, float]]:
     """建玉の見直しの線（名前・値段）。建値・向き・損切り（利確）が分かる建玉だけ。"""
     entry, side = p.get("price"), {"BUY": 1, "SELL": -1}.get(p.get("side", ""))
@@ -238,9 +255,12 @@ def watch_snapshot(now: dt.datetime, history: PriceHistory, positions: list[dict
                 row["peak_pips"] = round(peak, 1)
                 row["giveback_at_pips"] = round(peak * (1 - config.giveback_fraction), 1)
         row["thesis"] = p.get("thesis") or None
-        row["reviews"] = [{"label": label, "price": round(level, 3),
-                           "done": f"review {p.get('account')} {p.get('opened_at')} {label}" in fired_sessions}
-                          for label, level in review_levels(p, config)]
+        if p.get("managed") == "rules":
+            row["managed"], row["exit_level"], row["reviews"] = "rules", p.get("exit_level"), []
+        else:
+            row["reviews"] = [{"label": label, "price": round(level, 3),
+                               "done": f"review {p.get('account')} {p.get('opened_at')} {label}" in fired_sessions}
+                              for label, level in review_levels(p, config)]
         watched.append(row)
     upcoming = [h for h in config.session_times if f"{now:%H:%M}" < h and f"{now:%Y-%m-%d} {h}" not in fired_sessions]
     cooldown_until = last_wake + dt.timedelta(minutes=config.cooldown_minutes) if last_wake else None

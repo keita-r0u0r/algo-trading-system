@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 import pandas as pd
 
-from ..application import fx_calendar, fx_features
+from ..application import fx_calendar, fx_exits, fx_features, fx_filter, fx_setups, fx_sizing
 from ..application.fx_live_trade import Intent, LiveConfig, book_from_events
 from ..application.fx_paper import (
     PaperAccount,
@@ -33,7 +33,7 @@ from ..application.fx_paper import (
 )
 from ..core.fx.frame import TradingFrame, check
 from ..core.fx.model import RISK_PROFILES, SWAP_MARKUP, FxCosts, FxInstrument, swap_per_unit
-from ..infrastructure import econ_calendar, fx_live_log, fx_paper_log, rates
+from ..infrastructure import econ_calendar, fx_live_log, fx_paper_log, rates, typesafe
 from ..infrastructure.gmo_fx import GmoFxClient
 from ..infrastructure.gmo_fx_store import fetch_day, to_engine
 from .fx_live import LiveSession, sync
@@ -136,18 +136,29 @@ def instruments(api: GmoFxClient) -> dict[str, FxInstrument]:
     }
 
 
+#: 終わった営業日の1分足（プロセスの中でだけ覚える）
+_DAYS: dict[tuple[str, dt.date], pd.DataFrame] = {}
+#: 1分足をさかのぼる最小の日数。ハーネスの1時間足の50本平均に、週末をはさんでも足りるように
+BARS_DAYS = 5
+
+
 def recent_bars(api: GmoFxClient, symbol: str, now: dt.datetime, days_back: int) -> pd.DataFrame:
     """直近の営業日の1分足（仲値・spread・session）。週末は飛ばす。"""
     frames = []
     day = now.date() - dt.timedelta(days=days_back)
     while day <= now.date():
         if day.weekday() < 5:
-            try:
-                raw = fetch_day(api, symbol, day)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 404:
-                    raise
-                raw = pd.DataFrame()  # その日の営業日がまだ始まっていない（深夜0時〜朝）
+            if (symbol, day) in _DAYS:
+                raw = _DAYS[(symbol, day)].copy()
+            else:
+                try:
+                    raw = fetch_day(api, symbol, day)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404:
+                        raise
+                    raw = pd.DataFrame()  # その日の営業日がまだ始まっていない（深夜0時〜朝）
+                if not raw.empty and day < now.date() - dt.timedelta(days=1):
+                    _DAYS[(symbol, day)] = raw.copy()  # 終わった営業日は変わらないので覚える（見張り役は動き続ける）
             if not raw.empty:
                 raw["session"] = day
                 frames.append(raw)
@@ -235,7 +246,8 @@ def plan_when_opened(name: str, position, events: list[dict], now: dt.datetime) 
                     "reasoning": d.get("reasoning", ""), "exit_condition": d.get("exit_condition", ""),
                     "hold_minutes": d.get("hold_minutes"), "confidence": d.get("confidence"),
                     "stop_pips": d.get("stop_pips"), "take_pips": d.get("take_pips"),
-                    "setup": d.get("setup"), "invalidation_price": d.get("invalidation_price") or None,
+                    "setup": d.get("setup"), "exit_method": d.get("exit_method"),
+                    "invalidation_price": d.get("invalidation_price") or None,
                     "target_price": d.get("target_price") or None}
     return None
 
@@ -317,6 +329,12 @@ class Context:
     calendar: list = field(default_factory=list)
     #: 通貨ペアごとの日足の終値（特徴量の日足の部分に使う。1日1回だけ取る）
     daily: dict = field(default_factory=dict)
+    #: 画面の設定（判断する者の ON/OFF と、見送りを聞く相手）。state/fx_settings.json
+    settings: fx_filter.FxSettings = field(default_factory=fx_filter.FxSettings)
+    #: Jev の呼び出し口（キーが無い・使わない設定なら None）
+    jev: object = None
+    #: 通貨ペアごとの特徴量（この回の中で使い回す）
+    features: dict = field(default_factory=dict)
 
 
 def frame_for(name: str, ctx: Context) -> TradingFrame:
@@ -347,7 +365,9 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *
             return [(data, f"AI（同じ状態の判断を使い回し）: {data.get('reasoning', '')}", {**extra, "reused": True})]
         context = ai_context(account, frame, quotes, bars, now, events, ctx.today_rates, ctx.daily)
         if live:
-            context["frame"]["max_units"] = LiveConfig().max_units
+            sizing = ctx.settings.sizing_for("ai")
+            context["frame"]["max_units"] = sizing.max_units
+            context["frame"]["max_risk_per_trade"] = min(context["frame"].get("max_risk_per_trade", 1), sizing.max_risk)
             context["goal"] = ("実際の口座。利用者の目標は1か月で資金1.5倍。数量は risk_fraction（枠の上限まで）で決まる。"
                                "根拠が強いときは大きく、弱いときは小さく、無いときは hold。枠と損切りは必ず守る")
         context["market"]["economic_calendar"] = {
@@ -374,6 +394,8 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *
                  "context": context}
         ctx.ai_cache[key] = (data, extra)
         return [(data, f"AI {reply.model}: {data.get('reasoning', '')}", extra)]
+    if name == "harness":
+        return [harness_decision(account, ctx, events)]
     if name == "rule_hourly_breakout":
         h = hourly(bars[BASE], now)
         want = hourly_breakout_target(h)
@@ -447,7 +469,7 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
         if t["symbol"] in insts:
             bid, ask = float(t["bid"]), float(t["ask"])
             quotes[t["symbol"]] = {"bid": bid, "ask": ask, "spread": (ask - bid) / 0.01}
-    # AI には全通貨ペアの直近3日を見せる。建玉のある通貨ペアは、前回の実行から今までの足を全部確かめる
+    # 全通貨ペアの直近 BARS_DAYS 日を見る。建玉のある通貨ペアは、前回の実行から今までの足を全部確かめる
     # （週末や停止のあとに間が空いても、そのあいだの損切りを見逃さない。最大 MAX_GAP_DAYS 日）
     held_since: dict[str, dt.date] = {}
     for a in (accounts or {}).values():
@@ -457,12 +479,193 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
     bars = {}
     for sym in insts:
         gap = (now.date() - held_since[sym]).days + 1 if sym in held_since else 0
-        bars[sym] = recent_bars(api, sym, now, min(max(gap, 3), MAX_GAP_DAYS))
+        bars[sym] = recent_bars(api, sym, now, min(max(gap, BARS_DAYS), MAX_GAP_DAYS))
+    settings = load_settings()
+    uses_jev = (settings.filter.mode != "off" and settings.filter.provider == "jev") or settings.exits.selector == "jev"
+    jev = typesafe.jev_from_secrets() if uses_jev else None
     return Context(api=api, now=now, frame=frame, carry_frame=carry_frame, live_frame=live_frame, insts=insts, quotes=quotes, bars=bars,
                    ai=ai, today_rates=rates_summary(now.date()) if ai is not None else {},
                    short=short_rates(now.date()), ai_cache={}, trigger=trigger,
                    ai_last=ai_last_called(), ai_due=ai_due(trigger), calendar=load_calendar(now),
-                   daily=daily_for_features(api, now) if ai is not None else {})  # 前回の時刻は、ai_due が書き換える前に読む
+                   daily=daily_for_features(api, now) if ai is not None else {},  # 前回の時刻は、ai_due が書き換える前に読む
+                   settings=settings, jev=jev)
+
+
+SETTINGS = STATE / "fx_settings.json"
+JEV_USAGE = STATE / "jev_usage.jsonl"
+#: 新しい作り（ハーネス＋決まり）の決まり。変えたら application/fx_setups.py の HARNESS_VERSION を上げる
+HARNESS = fx_setups.HarnessRules()
+
+
+def load_settings(path: Path | None = None) -> fx_filter.FxSettings:
+    """画面の設定（無い・壊れていれば既定）。"""
+    try:
+        raw = json.loads((path or SETTINGS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = {}
+    return fx_filter.parse_settings(raw)
+
+
+def save_settings(settings: fx_filter.FxSettings, path: Path | None = None) -> None:
+    target = path or SETTINGS
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(settings.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def features_of(ctx: "Context", symbol: str) -> dict:
+    """通貨ペアの特徴量（この回の中で使い回す）。"""
+    if symbol not in ctx.features:
+        bars = ctx.bars.get(symbol)
+        ctx.features[symbol] = ({} if bars is None or bars.empty else
+                                fx_features.market_features(bars, ctx.now, daily_closes=ctx.daily.get(symbol)))
+    return ctx.features[symbol]
+
+
+def consult_candidate(ctx: "Context", decision: dict, features: dict) -> tuple[dict | None, dict]:
+    """決まりの候補について、設定した相手（Jev / AI）に「見送るか」と「決済の手法」を聞く（同じ相手なら1回で）。
+
+    返すのは (見送りの答え, 決済の手法の選び)。見送りを聞かない設定なら最初は None。
+    """
+    settings = ctx.settings
+    want_skip = settings.filter.mode != "off"
+    exit_choice: dict = {"by": "fixed", "method": settings.exits.method}
+    ask = {p for p, wanted in ((settings.filter.provider, want_skip), (settings.exits.selector, True))
+           if wanted and p in ("jev", "gemini", "ai")}
+    if not ask:
+        return None, exit_choice
+    symbol = decision["symbol"]
+    candidate = {k: decision.get(k) for k in ("action", "symbol", "stop_pips", "setup", "invalidation_price", "hold_minutes")}
+    candidate["entry_price"] = features.get("price")
+    state = fx_filter.review_state(candidate, features, fx_calendar.upcoming(ctx.calendar, ctx.now, [symbol]),
+                                   active_notes(ctx.now))
+    verdict: dict | None = None
+    if "jev" in ask:
+        skip, pick = want_skip and settings.filter.provider == "jev", settings.exits.selector == "jev"
+        try:
+            if ctx.jev is None:
+                raise RuntimeError("Jev のキーが置いていない（Secret Manager の typesafe-api-key）")
+            response = ctx.jev.ask(state, fx_filter.jev_questions(skip=skip, exit_method=pick))
+            usage = response.get("usage") or {}
+            typesafe.log_usage(JEV_USAGE, {"at": ctx.now.isoformat(), "model": response.get("model"), **usage,
+                                           "cost_usd": fx_filter.jev_cost_usd(usage)})
+            if skip:
+                verdict = fx_filter.jev_verdict(response, settings.filter)
+            if pick:
+                exit_choice = fx_filter.jev_exit_choice(response)
+        except Exception as exc:  # noqa: BLE001  聞けなくても決まりのとおり進める
+            error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            if skip:
+                verdict = {"provider": "jev", "error": error}
+            if pick:
+                exit_choice = {"by": "jev", "error": error}
+    if ask & {"gemini", "ai"}:
+        skip, pick = want_skip and settings.filter.provider == "gemini", settings.exits.selector == "ai"
+        try:
+            if ctx.ai is None:
+                raise RuntimeError("AI を使わない設定")
+            reply = ctx.ai.fx_review({**state, "exit_methods": fx_exits.METHODS}, ctx.now.date())
+            data = reply.data or {}
+            if skip:
+                verdict = {**fx_filter.gemini_verdict(data), "model": reply.model}
+            if pick:
+                exit_choice = fx_filter.gemini_exit_choice(data)
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            if skip:
+                verdict = {"provider": "gemini", "error": error}
+            if pick:
+                exit_choice = {"by": "ai", "error": error}
+    if "method" not in exit_choice:  # 選べなかったら決まった手法
+        exit_choice = {**exit_choice, "method": settings.exits.method}
+    return verdict, exit_choice
+
+
+def harness_decision(account: PaperAccount, ctx: "Context", events: list[dict]) -> tuple[dict, str, dict]:
+    """新しい作り: ハーネスの数字と決まりで判断する。持っていれば決済だけ、無ければ建てる候補を探す。"""
+    record = fx_setups.rules_record(HARNESS)
+    p = account.position
+    if p is not None:
+        side = 1 if p.units > 0 else -1
+        quote = ctx.quotes.get(p.symbol)
+        bars = ctx.bars.get(p.symbol)
+        if quote is None or not p.price or bars is None:
+            return {"action": "hold"}, "", {"logic": record, "note": f"{p.symbol} の値段が取れないので決まりを確かめられない"}
+        try:
+            opened = dt.datetime.fromisoformat(str(p.opened_at))
+        except ValueError:
+            opened = ctx.now
+        method = (plan_when_opened("harness", p, events, ctx.now) or {}).get("exit_method") or HARNESS.exit_method
+        stop_pips = abs(p.price - p.stop) / 0.01 if p.stop else HARNESS.min_stop_pips
+        result = fx_setups.exit_check(
+            side=side, entry_price=p.price, stop_pips=stop_pips, price=(quote["bid"] + quote["ask"]) / 2,
+            bars=bars, opened_at=opened, now=ctx.now, f=features_of(ctx, p.symbol), method=method, rules=HARNESS)
+        logic = {**record, "symbol": p.symbol, "exit_method": method, "exit_level": result.exit_level,
+                 "peak_pips": round(result.peak_pips, 1), "unrealized_pips": round(result.unrealized_pips, 1),
+                 "evidence": result.evidence}
+        if result.close:
+            return {"action": "close", "reasoning": result.reason}, "決まり: " + result.reason, {"logic": logic}
+        return {"action": "hold"}, "", {"logic": logic}
+    symbols = [s for s in ctx.live_frame.symbols if s in ctx.bars]
+    features = {s: features_of(ctx, s) for s in symbols}
+    quiet = {s: fx_calendar.quiet_reason(ctx.calendar, s, ctx.now) for s in symbols}
+    blocked = fx_setups.reentry_blocks(fx_setups.closed_trades(events, "harness"), ctx.now, HARNESS)
+    candidate, seen = fx_setups.best_entry(features, quiet=quiet, blocked=blocked, rules=HARNESS)
+    logic = {**record, "evidence": seen}
+    if candidate is None:
+        return {"action": "hold"}, "", {"logic": logic}
+    rules = replace(HARNESS, risk_fraction=ctx.settings.sizing_for("harness").max_risk)  # 決まりは上限いっぱいで建てる
+    verdict, exit_choice = consult_candidate(ctx, candidate.decision(rules), features[candidate.symbol])
+    decision = candidate.decision(rules, exit_choice["method"])
+    logic["exit_choice"] = exit_choice
+    ok, note = fx_filter.apply(verdict, ctx.settings.filter)
+    if verdict is not None:
+        logic["filter"] = {k: v for k, v in verdict.items() if k != "usage"}
+    if not ok:
+        return {"action": "hold"}, "", {"logic": logic, "note": note}
+    return decision, "決まり: " + decision["reasoning"], {"logic": logic, "note": note}
+
+
+SIZING_PROPOSALS = STATE / "fx_sizing_proposals.jsonl"
+#: 画面だけが書く（提案への答え）。見張り役とジョブは読まない
+SIZING_ANSWERS = STATE / "fx_sizing_answers.jsonl"
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    try:
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def append_jsonl(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def propose_sizing(ai, events: list[dict], settings: fx_filter.FxSettings, *, equity: float,
+                   available: float | None, now: dt.datetime, trigger: str) -> dict:
+    """AI に数量の上限の見直しを提案させ、記録に残す（適用はしない）。"""
+    context = fx_sizing.sizing_context(events, settings, equity=equity, available=available, now=now,
+                                       accounts=LiveConfig().accounts)
+    reply = ai.fx_sizing(context, now.date())
+    record = fx_sizing.proposal_record(reply.data or {}, settings, now, reply.model, trigger)
+    append_jsonl(SIZING_PROPOSALS, record)
+    return record
+
+
+def maybe_propose_sizing(ctx: "Context", session) -> None:
+    """1日1回、AI に数量の見直しを提案させる（失敗しても売買は止めない）。"""
+    if ctx.ai is None or not fx_sizing.due(read_jsonl(SIZING_PROPOSALS), ctx.now):
+        return
+    try:
+        record = propose_sizing(ctx.ai, session.log + session.events, ctx.settings, equity=session.equity,
+                                available=float(session.assets.get("availableAmount") or 0), now=ctx.now,
+                                trigger="1日1回の見直し")
+        print(f"  数量の見直しの提案: {len(record['changes'])} 件", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        append_jsonl(SIZING_PROPOSALS, {"kind": "error", "at": ctx.now.isoformat(timespec="seconds"),
+                                        "error": f"{type(exc).__name__}: {str(exc)[:200]}"})
 
 
 CALENDAR = STATE / "fx_calendar.json"
@@ -624,7 +827,9 @@ def ai_due(trigger: str) -> bool:
         last = dt.datetime.fromisoformat(AI_LAST.read_text(encoding="utf-8").strip()) if AI_LAST.exists() else None
     except ValueError:
         last = None
-    due = bool(trigger) or last is None or (now - last).total_seconds() >= AI_INTERVAL_SECONDS - 60
+    # 決まりが決済を持つ建玉（harness）だけの理由で起こされた回では、AI は呼ばない（費用と、AI の判断を混ぜないため）
+    for_ai = bool(trigger) and "harness の建玉" not in trigger
+    due = for_ai or last is None or (now - last).total_seconds() >= AI_INTERVAL_SECONDS - 60
     if due:
         try:
             AI_LAST.write_text(now.isoformat(timespec="seconds"), encoding="utf-8")
@@ -645,9 +850,16 @@ def live_watch_rows(events: list[dict]) -> list[dict]:
                 plan["invalidation_price"] = None
             if plan.get("target_price") and side * (plan["target_price"] - p.price) <= 0:
                 plan["target_price"] = None
-        rows.append({"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take,
-                     "price": p.price, "side": p.side, "opened_at": p.opened_at,
-                     "thesis": {k: plan.get(k) for k in ("invalidation_price", "target_price", "hold_minutes", "setup")}})
+        row = {"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take,
+               "price": p.price, "side": p.side, "opened_at": p.opened_at,
+               "thesis": {k: plan.get(k) for k in ("invalidation_price", "target_price", "hold_minutes", "setup")}}
+        if p.account == "harness":  # 決済は決まりが持つ。見張り役は、決まりが最後に出した「利益を守る線」を見る
+            row["managed"] = "rules"
+            row["exit_level"] = next((e["logic"].get("exit_level") for e in reversed(events)
+                                      if e.get("kind") == "live_decision" and e.get("account") == p.account
+                                      and isinstance(e.get("logic"), dict) and e.get("at", "") >= str(p.opened_at)),
+                                     None)
+        rows.append(row)
     return rows
 
 
@@ -678,17 +890,29 @@ def trade_live(ctx: "Context") -> bool:
     session = LiveSession.open()
     if session is None:
         return False
+    # 数量の上限は画面の設定（全体の枠 LiveConfig.max_units の内側）
+    session.config = replace(session.config, max_units_by_account=tuple(
+        (name, ctx.settings.sizing_for(name).max_units) for name in session.config.accounts))
     intents: list[Intent] = []
     for name in session.config.accounts:
         view = live_view(name, session)
+        switched_on = ctx.settings.enabled(name)
+        if not switched_on and view.position is None:
+            continue  # 画面で止めている（建玉があれば、決済の判断だけは続ける）
         account_frame = ctx.live_frame
         for decision, reason, extra in decide(name, view, ctx, session.log + session.events, live=True):
             equity = session.equity
+            cap = ctx.settings.sizing_for(name).max_risk
+            if str(decision.get("action", "")).startswith("open") and float(decision.get("risk_fraction") or 0) > cap:
+                decision = {**decision, "risk_fraction": cap}  # 画面で決めたリスクの上限で切る
+                extra = {**extra, "note": ((extra.get("note") or "") + f" リスクの割合を上限 {cap:.1%} で切った").strip()}
             approved, rejected = check(
                 decision, account_frame, equity=equity, holding=view.position.symbol if view.position else None,
                 spread_pips={s: q["spread"] for s, q in ctx.quotes.items()},
                 prices={s: q["ask"] for s, q in ctx.quotes.items()}, instruments=ctx.insts, halted=False,
             )
+            if approved is not None and approved.action != "close" and not switched_on:
+                approved, rejected = None, "画面で止めている（新しく建てない。建玉の決済は続ける）"
             session.events.append({"kind": "live_decision", "at": ctx.now.isoformat(), "account": name,
                                    "decision": {k: v for k, v in decision.items() if k != "context"},
                                    "approved": approved is not None, "rejected": rejected,
@@ -702,6 +926,7 @@ def trade_live(ctx: "Context") -> bool:
                                   stop_pips=approved.stop_pips, take_pips=approved.take_pips, reason=reason))
     session.execute(intents)
     session.finish()
+    maybe_propose_sizing(ctx, session)
     return True
 
 

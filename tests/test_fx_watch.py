@@ -123,3 +123,16 @@ def test_thesis_invalidation_and_slow_progress():
     slow = {**LONG, "opened_at": "2026-11-03T21:00:00+09:00", "thesis": {"target_price": 212.517, "hold_minutes": 60}}
     h2 = gbp([(at(21, 31), 212.247)])
     assert "半分たっても" in wake(at(21, 31), h2, [slow], fired=set())
+
+
+def test_rules_managed_position_wakes_only_at_its_exit_level():
+    h = history([(at(10, 6), 158.20), (at(10, 7), 158.20)])
+    pos = {"account": "harness", "symbol": "USD_JPY", "side": "BUY", "price": 158.0, "stop": 157.84, "take": 158.32,
+           "opened_at": "2026-11-03T09:00:00+09:00", "managed": "rules", "exit_level": 158.10,
+           "thesis": {"invalidation_price": 157.9, "target_price": 158.32, "hold_minutes": 10}}
+    fired = set()
+    assert wake(at(10, 7), h, [pos], fired=fired) == ""  # 予想の確認・見直しの線では起こさない
+    h.add("USD_JPY", at(10, 8), 158.09)
+    reason = wake(at(10, 8), h, [pos], fired=fired)
+    assert reason.startswith("決まりの決済の線: harness の建玉")
+    assert wake(at(10, 8, 30), h, [pos], fired=fired) == ""  # 同じ線では1回だけ
