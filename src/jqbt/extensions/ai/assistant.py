@@ -122,7 +122,7 @@ FX_SYSTEM = """あなたは、個人の FX の自動売買で売買を判断す�
 - 決まった形（JSON）で返す"""
 
 #: 役割ごとの考える深さ（effort）。説明と要約は medium、案と判断は high
-EFFORT = {"explain": "medium", "report": "medium", "ideas": "high", "decide": "high", "fx": "medium"}
+EFFORT = {"explain": "medium", "report": "medium", "ideas": "high", "decide": "high", "fx": "medium", "evaluate": "medium"}
 
 
 class AiError(RuntimeError):
@@ -222,6 +222,15 @@ FX_REVIEW_SCHEMA: dict[str, Any] = {
     "properties": {"skip": {"type": "boolean"}, "reason": {"type": "string"},
                    "exit_method": {"type": "string", "enum": FX_EXIT_METHODS}, "exit_reason": {"type": "string"}},
     "required": ["skip", "reason", "exit_method", "exit_reason"],
+    "additionalProperties": False,
+}
+
+#: ほかの判断する者の判断の評価（振り返り用）
+FX_EVALUATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"score": {"type": "integer", "minimum": 1, "maximum": 5}, "verdict": {"type": "string"},
+                   "good": {"type": "string"}, "concerns": {"type": "string"}},
+    "required": ["score", "verdict", "good", "concerns"],
     "additionalProperties": False,
 }
 
@@ -437,7 +446,7 @@ class AiAssistant:
         }
         started = time.monotonic()
         try:
-            system = FX_SYSTEM if role == "fx" else SYSTEM
+            system = FX_SYSTEM if role in ("fx", "evaluate") else SYSTEM
             reply = self.model.ask(model=key, system=system, prompt=prompt, schema=schema, effort=EFFORT[role])
         except RefusalError as exc:
             self.usage.append({**record, "ok": False, "error": str(exc)[:200],
@@ -572,6 +581,20 @@ class AiAssistant:
             f"<context>\n{to_context(context)}\n</context>"
         )
         return self._ask("fx", prompt, FX_SIZING_SCHEMA, today)
+
+    def fx_evaluate(self, context: dict[str, Any], today: dt.date) -> ModelReply:
+        """ほかの判断する者（Jev など）の売買の判断を、別の目で評価する（記録だけ。売買は止めない）。"""
+        prompt = (
+            "FX の実際の口座で、判断する者（<decision> の by）が出した判断を、プロのトレーダーの目で評価してください。"
+            "評価は記録に残り、あとで成績と照らし合わせる振り返りに使います（この評価で売買は変わりません）。\n"
+            "- score は 1（明らかにおかしい）〜5（根拠がそろっている）\n"
+            "- 見るのは: <market> の材料と判断の向きが合っているか、流れに逆らっていないか、損切りがふだんの揺れより狭くないか、"
+            "経済指標の前後でないか、リスクの大きさが根拠の強さに見合うか\n"
+            "- good・concerns・verdict は日本語で、見た数字を挙げて短く\n\n"
+            f"<decision>\n{to_context(context.get('decision', {}))}\n</decision>\n\n"
+            f"<market>\n{to_context(context.get('market', {}))}\n</market>"
+        )
+        return self._ask("evaluate", prompt, FX_EVALUATION_SCHEMA, today)
 
     # D ---------------------------------------------------------------
     def decide(

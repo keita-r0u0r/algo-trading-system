@@ -38,11 +38,11 @@ from typing import Any
 class LiveConfig:
     enabled: bool = False
     #: まねる口座（ペーパー運用の口座の名前）
-    accounts: tuple[str, ...] = ("ai", "carry_trend_USD_JPY", "harness")
+    accounts: tuple[str, ...] = ("ai", "carry_trend_USD_JPY", "harness", "jev")
     #: 1口座あたりの数量の上限（通貨）。判断する者が状況に応じて決めた数量を、ここで切る（利用者が決めた: 1,000）
     max_units: int = 1_000
     #: 口座ごとの上限（``max_units`` より小さくする口座だけ）。新しい作り（harness）は、比べるあいだ小さく動かす
-    max_units_by_account: tuple[tuple[str, int], ...] = (("harness", 300),)
+    max_units_by_account: tuple[tuple[str, int], ...] = (("harness", 300), ("jev", 300))
     #: 最小の注文数量（GMOコインは各通貨ペア100通貨）
     min_units: int = 100
     #: その日の初めから評価額がこの割合だけ減ったら、その日は新しく建てない。None なら使わない（既定。

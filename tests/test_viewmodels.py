@@ -213,3 +213,43 @@ def test_harness_reason_reads_the_evidence():
     assert vm.explain_decision(e) == "建てない。ドル円: 押していない"
     e = {"account": "harness", "decision": {"action": "hold"}, "logic": {"evidence": ["含み損益 +3.0 pips"]}}
     assert vm.explain_decision(e).startswith("持ち続ける")
+
+
+def test_changelog_parses_and_every_entry_has_a_title():
+    from pathlib import Path
+
+    from jqbt.interfaces import viewmodels as vm
+
+    text = "# x\n\n## #53 · 2026-11-04 · 新しい\n- **売買**: a\n\n## #52 · 2026-11-03 · 前の\n- b\n"
+    log = vm.parse_changelog(text)
+    assert log[53] == {"date": "2026-11-04", "title": "新しい", "body": "- **売買**: a"} and log[52]["body"] == "- b"
+    real = vm.parse_changelog((Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8"))
+    assert real and all(e["title"] and e["date"] for e in real.values())
+
+
+def test_release_rows_are_newest_first_with_changes():
+    from jqbt.interfaces import viewmodels as vm
+
+    releases = [{"version": "a", "verified_at": "2026-11-03T22:30:00+09:00", "result": "backfill", "prs": [51]},
+                {"version": "b", "verified_at": "2026-11-04T08:08:00+09:00", "result": "ok", "previous": "a",
+                 "prs": [52], "titles": {"52": "題（GitHub）"}}]
+    rows = vm.release_rows(releases, {52: {"title": "題", "body": "- 中身", "date": "x"}})
+    assert [r["version"] for r in rows] == ["b", "a"]
+    assert rows[0]["changes"] == [{"pr": 52, "title": "題", "body": "- 中身"}]
+    assert rows[1]["changes"][0]["title"] == ""
+
+
+def test_blocked_opens_lists_recent_rejected_entries():
+    import datetime as dt
+
+    from jqbt.interfaces import viewmodels as vm
+
+    jst = dt.timezone(dt.timedelta(hours=9))
+    events = [{"kind": "live_decision", "at": "2026-11-04T06:40:00+09:00", "account": "ai", "approved": False,
+               "decision": {"action": "open_short", "symbol": "EUR_JPY"}, "rejected": "古い"},
+              {"kind": "live_decision", "at": "2026-11-04T07:55:00+09:00", "account": "ai", "approved": False,
+               "decision": {"action": "open_short", "symbol": "GBP_JPY"}, "rejected": "スプレッドが広い（17.9 pips > 1）"},
+              {"kind": "live_decision", "at": "2026-11-04T08:00:00+09:00", "account": "ai", "approved": False,
+               "decision": {"action": "hold"}}]
+    rows = vm.blocked_opens(events, dt.datetime(2026, 11, 4, 8, 10, tzinfo=jst))
+    assert [r["symbol"] for r in rows] == ["GBP_JPY"] and "スプレッド" in rows[0]["reason"]

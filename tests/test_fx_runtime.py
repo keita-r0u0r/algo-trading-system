@@ -245,3 +245,34 @@ def test_live_watch_rows_mark_harness_as_rules_managed():
     ]
     [row] = rt.live_watch_rows(events)
     assert row["managed"] == "rules" and row["exit_level"] == 158.1
+
+
+def test_jev_decides_direction_and_risk_and_another_ai_evaluates(tmp_path, monkeypatch):
+    from test_fx_setups import features
+
+    from jqbt.application.fx_paper import PaperAccount
+
+    monkeypatch.setattr(rt, "JEV_USAGE", tmp_path / "jev.jsonl")
+    monkeypatch.setattr(rt, "NOTES", tmp_path / "notes.jsonl")
+
+    class Jev:
+        def ask(self, state, questions):
+            assert "outlook_USD_JPY" in questions
+            return {"model": "jev-1", "answers": {
+                "outlook_USD_JPY": {"score": 0.5, "confidence": 0.8},
+                "risk": {"score": 3.0}, "exit_method": {"choice": "target"}}}
+
+    class Reviewer:
+        def fx_evaluate(self, context, today):
+            assert context["decision"]["by"] == "jev"
+            return type("R", (), {"model": "vertex:claude", "data": {"score": 2, "verdict": "流れに逆らう"}})()
+
+    empty = PaperAccount("jev", 10000, 10000, None, equity=10000, day_start_equity=10000)
+    ctx = harness_ctx({"USD_JPY": features()}, jev=Jev())
+    ctx.ai = Reviewer()
+    d, reason, extra = rt.jev_decision(empty, ctx, [])
+    assert d["action"] == "open_short" and d["stop_pips"] == 16.0 and d["take_pips"] == 48.0
+    assert d["risk_fraction"] == 0.01  # Jev は2%と言ったが、画面の上限（1%）で切る
+    assert extra["logic"]["evaluation"] == {"model": "vertex:claude", "score": 2, "verdict": "流れに逆らう"}
+    d, _, extra = rt.jev_decision(empty, harness_ctx({"USD_JPY": features()}, jev=None), [])
+    assert d["action"] == "hold" and "キー" in extra["error"]

@@ -16,7 +16,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # 依存を先に入れる。コードだけ変えたときに、ここからやり直さずに済む
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md CHANGELOG.md ./
 COPY src ./src
 RUN pip install -e ".[dev,gui,gcp,ai,watch]"
 
