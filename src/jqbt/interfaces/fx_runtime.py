@@ -185,6 +185,27 @@ def rates_summary(today: dt.date) -> dict:
         return {"error": f"金利を取り込めませんでした（{type(exc).__name__}）"}
 
 
+def position_numbers(p, quote: dict | None, pip: float = 0.01) -> dict:
+    """建玉の数字を、AI が計算しなくて済むように出す（AI は生の値段から pips や円を読み違えるので）。
+
+    決済するときの値段は、買いなら bid、売りなら ask。円の損益は 数量 × 値幅（円）。
+    """
+    sign = 1 if p.units > 0 else -1
+    numbers = {"symbol": p.symbol, "side": "long" if sign > 0 else "short", "units": abs(p.units),
+               "entry_price": p.price, "stop": p.stop, "take": p.take, "opened_at": p.opened_at,
+               "yen_per_pip": round(abs(p.units) * pip, 2)}
+    if quote and p.price:
+        exit_price = quote["bid"] if sign > 0 else quote["ask"]
+        numbers["exit_price_now"] = exit_price
+        numbers["unrealized_pips"] = round(sign * (exit_price - p.price) / pip, 1)
+        numbers["unrealized_yen"] = round(sign * (exit_price - p.price) * abs(p.units), 1)
+        if p.stop:
+            numbers["pips_to_stop"] = round(abs(exit_price - p.stop) / pip, 1)
+        if p.take:
+            numbers["pips_to_take"] = round(abs(p.take - exit_price) / pip, 1)
+    return numbers
+
+
 def ai_context(account: PaperAccount, frame: TradingFrame, quotes: dict, bars: dict, now: dt.datetime,
                events: list[dict], today_rates: dict) -> dict:
     p = account.position
@@ -194,7 +215,8 @@ def ai_context(account: PaperAccount, frame: TradingFrame, quotes: dict, bars: d
         "rates_2y_percent": today_rates,
         "symbols": {},
         "note": "hourly_close は完成した1時間足の仲値の終値（古い順、直近48本）。recent_5min_close は直近2時間の"
-                "5分足の終値（古い順、24本）。daily_range_pips は営業日ごとの値幅",
+                "5分足の終値（古い順、24本）。daily_range_pips は営業日ごとの値幅。円の通貨ペアでは 1 pip = 0.01円。"
+                "建玉の含み損益・損切りまでの距離は account.position に計算済み（自分で計算し直さない）",
     }
     for sym in frame.symbols:
         if sym not in quotes or sym not in bars:
@@ -215,10 +237,7 @@ def ai_context(account: PaperAccount, frame: TradingFrame, quotes: dict, bars: d
             "equity": round(mark(account, quotes[p.symbol]["bid"], quotes[p.symbol]["ask"]) if p else account.cash, 1),
             "day_start_equity": round(account.day_start_equity or account.cash, 1),
             "halted_today": account.halted_session == account.session,
-            "position": None if p is None else {
-                "symbol": p.symbol, "side": "long" if p.units > 0 else "short", "units": p.units,
-                "entry_price": p.price, "stop": p.stop, "take": p.take, "opened_at": p.opened_at,
-            },
+            "position": None if p is None else position_numbers(p, quotes.get(p.symbol)),
             "recent_closed_trades": [
                 {"symbol": e["symbol"], "pnl_yen": round(e["pnl"], 1), "reason": e["reason"], "closed_at": e["at"]}
                 for e in closes
