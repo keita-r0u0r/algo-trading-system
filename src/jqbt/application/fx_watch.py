@@ -94,3 +94,33 @@ def reason_to_wake(
                 fired_sessions.add(key + hhmm)
                 return f"時間帯の切り替わり（{hhmm}）"
     return ""
+
+
+def watch_snapshot(now: dt.datetime, history: PriceHistory, positions: list[dict], config: WatchConfig, *,
+                   last_wake: dt.datetime | None, fired_sessions: set[str]) -> dict:
+    """今なにを見張っていて、判断を起こす線まであとどれくらいか（画面に出す）。``reason_to_wake`` と同じ線を使う。"""
+    symbols = {}
+    for symbol in sorted(history.points):
+        move = history.move_pips(symbol, config.pip)
+        symbols[symbol] = {"price": history.last(symbol), "move_pips": round(move, 1),
+                           "to_wake_pips": round(max(0.0, config.move_pips - abs(move)), 1)}
+    watched = []
+    for p in positions:
+        price = history.last(p["symbol"])
+        row = {"venue": p.get("venue"), "account": p.get("account"), "symbol": p["symbol"],
+               "stop": p.get("stop"), "take": p.get("take")}
+        if price is not None:
+            for key, level in (("pips_to_stop", p.get("stop")), ("pips_to_take", p.get("take"))):
+                if level is not None:
+                    row[key] = round(abs(price - level) / config.pip, 1)
+        watched.append(row)
+    upcoming = [h for h in config.session_times if f"{now:%H:%M}" < h and f"{now:%Y-%m-%d} {h}" not in fired_sessions]
+    cooldown_until = last_wake + dt.timedelta(minutes=config.cooldown_minutes) if last_wake else None
+    return {
+        "at": now.isoformat(timespec="seconds"),
+        "rules": {"move_pips": config.move_pips, "window_minutes": config.window_minutes, "near_pips": config.near_pips,
+                  "session_times": list(config.session_times), "cooldown_minutes": config.cooldown_minutes},
+        "symbols": symbols, "positions": watched,
+        "next_session": upcoming[0] if upcoming and now.weekday() < 5 else None,
+        "cooldown_until": cooldown_until.isoformat(timespec="seconds") if cooldown_until and cooldown_until > now else None,
+    }

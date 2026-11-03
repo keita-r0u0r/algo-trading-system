@@ -112,7 +112,8 @@ def test_explain_ai_default_hold_and_holdings():
     from jqbt.interfaces.viewmodels import explain_decision, holdings_over_time
 
     assert "呼べなかった" in explain_decision({"error": "PermissionDenied", "decision": {"action": "hold"}})
-    assert "呼ぶ回ではない" in explain_decision({"note": "x", "decision": {"action": "hold"}})
+    assert explain_decision({"note": "前回 AI を呼んだのは 12:00", "decision": {"action": "hold"}}) == "前回 AI を呼んだのは 12:00"
+    assert "呼ぶ回ではない" in explain_decision({"note": "AI を呼ぶ回ではない（古い版）", "decision": {"action": "hold"}})
     events = [{"kind": "live_decision", "account": "ai"},
               {"kind": "live_open", "account": "ai", "position_id": 1},
               {"kind": "live_decision", "account": "ai"},

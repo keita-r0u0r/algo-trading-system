@@ -270,6 +270,8 @@ class Context:
     trigger: str = ""
     #: この回で AI を呼ぶか
     ai_due: bool = True
+    #: この回の前に、最後に AI を呼んだ時刻（呼ばない理由を記録に残すため）
+    ai_last: dt.datetime | None = None
 
 
 def frame_for(name: str, ctx: Context) -> TradingFrame:
@@ -293,8 +295,7 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *
     decisions: list[tuple[dict, str, dict]] = []
     if name == "ai":
         if ctx.ai is None or not ctx.ai_due:
-            return [({"action": "hold"}, "", {"note": "AI を呼ぶ回ではない（前回から15分たっていない・見張り役が起こしていない）"})] \
-                if ctx.ai is not None else []
+            return [({"action": "hold"}, "", {"note": ai_skip_reason(ctx)})] if ctx.ai is not None else []
         key = (live, position_signature(account))  # 枠が違えば判断も違うので、ペーパーと実際では使い回さない
         if key in ctx.ai_cache:
             data, extra = ctx.ai_cache[key]
@@ -405,7 +406,8 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
         bars[sym] = recent_bars(api, sym, now, min(max(gap, 3), MAX_GAP_DAYS))
     return Context(api=api, now=now, frame=frame, carry_frame=carry_frame, live_frame=live_frame, insts=insts, quotes=quotes, bars=bars,
                    ai=ai, today_rates=rates_summary(now.date()) if ai is not None else {},
-                   short=short_rates(now.date()), ai_cache={}, trigger=trigger, ai_due=ai_due(trigger))
+                   short=short_rates(now.date()), ai_cache={}, trigger=trigger,
+                   ai_last=ai_last_called(), ai_due=ai_due(trigger))  # 前回の時刻は、ai_due が書き換える前に読む
 
 
 def run_paper(ctx: "Context", accounts: dict[str, PaperAccount], events: list[dict]) -> list[dict]:
@@ -498,6 +500,25 @@ def watcher_trades() -> bool:
         except ValueError:
             continue
     return False
+
+
+def ai_last_called() -> dt.datetime | None:
+    """最後に AI を呼んだ時刻（無ければ None）。"""
+    try:
+        return dt.datetime.fromisoformat(AI_LAST.read_text(encoding="utf-8").strip()) if AI_LAST.exists() else None
+    except (OSError, ValueError):
+        return None
+
+
+def ai_skip_reason(ctx: "Context") -> str:
+    """AI を呼ばなかった理由を、人が読める文で。"""
+    if ctx.ai_last is None:
+        return "AI を呼ばなかった（前回の時刻がわからない）"
+    minutes = (ctx.now - ctx.ai_last).total_seconds() / 60
+    next_at = ctx.ai_last + dt.timedelta(seconds=AI_INTERVAL_SECONDS)
+    return (f"前回 AI を呼んだのは {ctx.ai_last:%H:%M}（{minutes:.0f}分前）で、まだ15分たっていない。"
+            f"この回は5分ごとの定期の回で、見張り役が急変などで起こした回でもないので、AI は呼ばずに今の建玉のままにした。"
+            f"次に AI を呼ぶのは {next_at:%H:%M} ごろか、急変・損切り/利確の近く・時間帯の切り替わりで起こされたとき")
 
 
 def ai_due(trigger: str) -> bool:

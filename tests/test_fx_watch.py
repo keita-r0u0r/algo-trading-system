@@ -53,3 +53,20 @@ def test_session_open_fires_once():
     fired = set()
     assert "17:00" in wake(at(17, 2), h, fired=fired)
     assert wake(at(17, 7), h, fired=fired) == ""
+
+
+def test_watch_snapshot_shows_distance_to_wake():
+    import datetime as dt
+
+    from jqbt.application.fx_watch import PriceHistory, WatchConfig, watch_snapshot
+
+    jst = dt.timezone(dt.timedelta(hours=9))
+    now = dt.datetime(2026, 11, 3, 12, 0, tzinfo=jst)
+    h = PriceHistory(dt.timedelta(minutes=5))
+    h.add("USD_JPY", now - dt.timedelta(minutes=4), 157.900)
+    h.add("USD_JPY", now, 157.950)
+    snap = watch_snapshot(now, h, [{"venue": "live", "account": "ai", "symbol": "USD_JPY", "stop": 157.676, "take": None}],
+                          WatchConfig(), last_wake=None, fired_sessions=set())
+    assert snap["symbols"]["USD_JPY"] == {"price": 157.95, "move_pips": 5.0, "to_wake_pips": 10.0}
+    assert snap["positions"][0]["pips_to_stop"] == 27.4 and "pips_to_take" not in snap["positions"][0]
+    assert snap["next_session"] == "17:00" and snap["cooldown_until"] is None

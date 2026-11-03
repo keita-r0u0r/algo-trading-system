@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from jqbt.application.fx_watch import PriceHistory, WatchConfig, reason_to_wake  # noqa: E402
+from jqbt.application.fx_watch import PriceHistory, WatchConfig, reason_to_wake, watch_snapshot  # noqa: E402
 
 JST = dt.timezone(dt.timedelta(hours=9))
 WS_URL = "wss://forex-api.coin.z.com/ws/public/v1"
@@ -182,6 +182,10 @@ async def watch(dry_run: bool) -> None:
                             asyncio.create_task(cycle(""))
                     if cloud and clock - last_beat >= 60:
                         last_beat = clock
+                        state["watch"] = watch_snapshot(now, history, positions, CONFIG, last_wake=last_wake,
+                                                        fired_sessions=fired)
+                        state["next_periodic_at"] = (now + dt.timedelta(seconds=max(0.0, next_periodic - clock))
+                                                     ).isoformat(timespec="seconds") if trades else None
                         await asyncio.to_thread(cloud.write_json, "state/fx_watch.json", state)
         except Exception as exc:  # 切れたら、少し待ってつなぎ直す
             state["reconnects"] += 1
