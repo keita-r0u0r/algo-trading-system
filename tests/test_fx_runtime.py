@@ -41,7 +41,9 @@ def test_claim_run_ignores_broken_marker(state):
     ({"trading": True, "last_ok_cycle": ago(rt.WATCH_FRESH_SECONDS + 60)}, False),  # 止まっている・口座に届かない → ジョブが代わる
     ({"trading": False, "last_ok_cycle": ago(30)}, False),  # 見張るだけ
     ({"trading": True, "last_ok_cycle": None}, False),
-    ({"trading": True, "last_cycle": ago(30)}, False),  # 回は回っているが口座に届いていない
+    ({"trading": True, "last_cycle": ago(30), "started_at": ago(3600)}, False),  # 回は回っているが口座に届いていない
+    ({"trading": True, "last_ok_cycle": None, "started_at": ago(60)}, True),  # 起動直後: 最初の回までは担当
+    ({"trading": False, "started_at": ago(60)}, False),
 ])
 def test_watcher_trades(state, data, expected):
     (state / "fx_watch.json").write_text(json.dumps(data))
