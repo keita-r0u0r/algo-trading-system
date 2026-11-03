@@ -831,8 +831,8 @@ def watch_panel(events: list[dict] | None = None) -> None:
                     looks.append(f"予想: {t['invalidation_price']} を越えたら根拠が崩れる")
                 if t.get("target_price") and t.get("hold_minutes"):
                     looks.append(f"予想: {t['hold_minutes']:.0f}分で {t['target_price']} まで（遅れたら見直す）")
-                if r.get("account") != "ai":
-                    looks.insert(0, "機械の判断なので、AI ではなく決まり（ロジック）が5分ごとに見る")
+                if r.get("account") != "ai":  # 機械の判断は、AI の定期の回ではなく、決まりが5分ごとに見る
+                    looks = ["決まり（ロジック）が5分ごとに見る"] + looks[1:]
                 st.caption("次に見るとき: " + "／".join(looks))
         wakes = state.get("wakes") or []
         if wakes:
@@ -886,11 +886,11 @@ def ai_consult_panel(events: list[dict], prices: dict) -> None:
     if "ai" not in os.environ.get("JQBT_EXTENSIONS", ""):
         return
     with st.expander("AI と相談する・AI にメモを渡す", icon=":material/forum:"):
-        history = st.session_state.setdefault("consult", [])
+        history = st.session_state.setdefault("consult_history", [])
         for q, a in history[-6:]:
             st.markdown(f"**あなた**: {q}")
             st.markdown(f"**AI**: {a}")
-        with st.form("consult", clear_on_submit=True):
+        with st.form("consult_form", clear_on_submit=True):
             question = st.text_area("質問", placeholder="ポンド円の含み損、今どうするのがよい？ 閉じる条件はまだ生きている？",
                                     height=80)
             if st.form_submit_button("聞く", type="primary") and question.strip():
@@ -908,7 +908,7 @@ def ai_consult_panel(events: list[dict], prices: dict) -> None:
         st.caption("相談は答えを返すだけで、注文は出しません。1回 約 $0.002。")
         st.markdown("**AI にメモを渡す**（期限まで、毎回の判断の材料に入る。AI は枠と損切りの範囲で従う）")
         now = dt.datetime.now(JST)
-        with st.form("note", clear_on_submit=True):
+        with st.form("note_form", clear_on_submit=True):
             text = st.text_input("メモ", placeholder="今夜の選挙の結果が出るまで、新しく建てないで")
             hours = st.selectbox("期限", [1, 3, 6, 12, 24], index=1, format_func=lambda h: f"{h}時間")
             if st.form_submit_button("渡す") and text.strip():
@@ -954,10 +954,63 @@ def calendar_panel(now: dt.datetime) -> None:
             } for r in rows]), hide_index=True, width="stretch")
 
 
+#: GCP の固定費の目安（米ドル/月）。外部 IP 2つ（約 $7.3）・Cloud NAT（約 $1）・5分ごとのジョブ・保存。請求書で確かめる
+INFRA_MONTHLY_USD = (10, 15)
+
+
+def kpi_strip(events: list[dict], prices: dict) -> None:
+    """いちばん上に出す要約: 今の資産・今月の目標と見込み・届く確からしさ・費用。"""
+    now = dt.datetime.now(JST)
+    snapshots = [e for e in events if e.get("kind") == "snapshot" and live_assets(e)]
+    points = [(dt.datetime.fromisoformat(e["at"]), float(live_assets(e).get("equity") or 0)) for e in snapshots]
+    positions = live_positions(events, prices)
+    if snapshots:
+        last = live_assets(snapshots[-1])
+        balance = float(last.get("balance") or last.get("equity") or 0)
+        equity = balance + sum(r["含み損益"] for r in positions) if positions else float(last.get("equity") or 0)
+        points.append((now, equity))
+    o = vm.month_outlook(points, now) if points else {}
+    try:
+        usage = [json.loads(line) for line in (ROOT / "state" / "ai_usage.jsonl").read_text(encoding="utf-8").splitlines()
+                 if line.strip()]
+    except OSError:
+        usage = []
+    cost = vm.monthly_ai_cost(usage, now)
+    budget = float(os.environ.get("AI_MONTHLY_BUDGET_USD", "5") or 5)
+    c = st.columns(5)
+    if o:
+        c[0].metric("今の資産", f"{o['current']:,.0f} 円", f"月初から {o['current'] / o['start'] - 1:+.1%}")
+        c[1].metric(f"今月の目標（{o['goal'] / o['start']:.1f}倍）", f"{o['goal']:,.0f} 円",
+                    f"あと {o['goal'] - o['current']:,.0f} 円・1日 {o['required_daily']:+.1%} 必要" if o.get("required_daily") is not None else "",
+                    delta_color="off", delta_arrow="off")
+        if o.get("projected"):
+            c[2].metric("月末の見込み（今のペース）", f"{o['projected']:,.0f} 円",
+                        f"目標まで {o['projected'] - o['goal']:+,.0f} 円",
+                        delta_color="normal" if o["projected"] >= o["goal"] else "inverse",
+                        help=f"月初から {o['elapsed_days']:.1f} 平日で1日 {o['daily_pace']:+.2%}。残り {o['remaining_days']:.1f} 平日も同じペースなら")
+        else:
+            c[2].metric("月末の見込み（今のペース）", "—", "まだ半日分もない", delta_color="off", delta_arrow="off")
+        if o.get("chance") is not None:
+            c[3].metric("目標に届く確からしさ", f"{o['chance']:.0%}", f"平日 {o['days_of_data']}日分のばらつきから",
+                        delta_color="off", delta_arrow="off",
+                        help="日ごとの伸びの平均とばらつきが今月の残りも続くとしたとき、月末に目標以上になる割合。日数が少ないうちは当てにならない")
+        else:
+            c[3].metric("目標に届く確からしさ", "まだ出せない", f"平日 {o.get('days_of_data', 0)}日分（5日分から出す）",
+                        delta_color="off", delta_arrow="off")
+    else:
+        c[0].metric("今の資産", "—", "口座を読んだ記録がまだ無い", delta_color="off", delta_arrow="off")
+    c[4].metric("今月の費用", f"AI ${cost['spent']:.2f}",
+                f"月末見込み ${cost['projected']:.2f}／上限 ${budget:g}",
+                delta_color="inverse" if cost["projected"] > budget else "off", delta_arrow="off",
+                help=f"AI は実績と、今のペースでの月末の見込み。GCP の固定費は別に 月 ${INFRA_MONTHLY_USD[0]}〜{INFRA_MONTHLY_USD[1]} の目安"
+                     "（外部 IP 2つ・Cloud NAT・5分ごとのジョブ・保存。正確な額は請求書で確かめる）")
+
+
 def live_overview() -> None:
     prices = quotes()
     price_strip(prices)
     events = live_log()
+    kpi_strip(events, prices)
     health_panel(events)
     watch_panel(events)
     ai_consult_panel(events, prices)
