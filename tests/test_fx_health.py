@@ -47,8 +47,14 @@ def test_ai_default_holds_are_caught():
 
 def test_watcher_problems():
     assert next(f for f in run(watch={}) if f.name == "見張り役").state == "bad"
-    stale = {**healthy_watch(), "last_tick": iso(NOW - 10 * M)}
-    assert "値段が届いていない" in next(f for f in run(watch=stale) if f.name == "見張り役").text
+    restarting = {**healthy_watch(), "last_tick": iso(NOW - 5 * M)}
+    f = next(f for f in run(watch=restarting) if f.name == "見張り役")
+    assert f.state == "warn" and "作り直し" in f.text and "待つだけ" in f.action and "09:55" in f.text
+    down = {**healthy_watch(), "last_tick": iso(NOW - 30 * M)}
+    f = next(f for f in run(watch=down) if f.name == "見張り役")
+    assert f.state == "bad" and f.impact and f.action
+    booting = {**healthy_watch(), "last_ok_cycle": None, "started_at": iso(NOW - 2 * M)}
+    assert next(f for f in run(watch=booting) if f.name == "見張り役").state == "info"
     rejected = {**healthy_watch(), "last_ok_cycle": iso(NOW - 60 * M)}
     assert "口座に届いていない" in next(f for f in run(watch=rejected) if f.name == "見張り役").text
 

@@ -24,16 +24,23 @@ JST = dt.timezone(dt.timedelta(hours=9))
 AI_STALE_MINUTES = 20
 DECISION_STALE_MINUTES = 15
 TICK_STALE_MINUTES = 3
+#: 値段が途切れてもこの分数までは、作り直し（反映）や一時的な切断として「注意」にとどめる。超えたら異常
+TICK_DOWN_MINUTES = 10
 ERROR_WINDOW = dt.timedelta(hours=1)
 
 
 @dataclass(frozen=True)
 class Finding:
-    """1つの確認の結果。state は ok / info / warn / bad。"""
+    """1つの確認の結果。state は ok / info / warn / bad。
+
+    text は何が起きているか、impact はそれで何が困るか（困らないか）、action は利用者がやること。
+    """
 
     name: str
     state: str
     text: str
+    impact: str = ""
+    action: str = ""
 
 
 def market_open(now: dt.datetime) -> bool:
@@ -92,42 +99,78 @@ def check_all(now: dt.datetime, *, watch: dict[str, Any], live_events: Sequence[
     findings: list[Finding] = []
 
     # 見張り役
-    tick, ok_cycle = _at(watch.get("last_tick")), _at(watch.get("last_ok_cycle"))
+    tick, ok_cycle, started = _at(watch.get("last_tick")), _at(watch.get("last_ok_cycle")), _at(watch.get("started_at"))
+    covered = "その間は、5分ごとのジョブが代わりに判断する。建玉は GMOコイン側の損切り・利確で守られている"
     if not watch:
-        findings.append(Finding("見張り役", "bad", "生きている印が無い（動いていない）"))
+        findings.append(Finding("見張り役", "bad", "生きている印が無い（一度も動いていない）",
+                                "急変への随時判断ができない。" + covered,
+                                "fx_watch_enabled = true で反映したか確かめる。わからなければ Claude に「見張り役が動いていない」と伝える"))
     elif not is_open:
-        findings.append(Finding("見張り役", "info", "市場が閉まっている"))
+        findings.append(Finding("見張り役", "info", "市場が閉まっている（土曜 7:00〜月曜 7:00）", "なし", "なし"))
     elif tick is None or now - tick > dt.timedelta(minutes=TICK_STALE_MINUTES):
-        findings.append(Finding("見張り役", "bad", f"値段が届いていない（最後 {str(watch.get('last_tick'))[5:16]}）"))
+        minutes = (now - tick).total_seconds() / 60 if tick else None
+        since = f"{tick:%H:%M} から {minutes:.0f}分" if tick else "起動してから"
+        if minutes is not None and minutes <= TICK_DOWN_MINUTES:
+            findings.append(Finding("見張り役", "warn", f"値段が届いていない（{since}）。反映による作り直しか、一時的な切断の可能性が高い",
+                                    "急変への随時判断が止まっている。" + covered,
+                                    f"反映した直後なら待つだけでよい（数分で戻る）。{TICK_DOWN_MINUTES}分を超えたら異常として出す"))
+        else:
+            findings.append(Finding("見張り役", "bad", f"値段が届いていない（{since}）",
+                                    "急変への随時判断が止まっている。" + covered,
+                                    "Claude に「見張り役が止まっている」と伝える（仮想マシンの再起動・ログの確認をする）"))
     elif not watch.get("trading"):
-        findings.append(Finding("見張り役", "warn", "見張るだけで、売買を担当していない（ジョブが代わりに売買）"))
+        findings.append(Finding("見張り役", "warn", "見張るだけで、実際の売買を担当していない",
+                                "急変への随時判断が実際の口座に届かない。" + covered,
+                                "FX_WATCH_TRADES が true になっているか確かめる（Claude に伝える）"))
+    elif ok_cycle is None and started and now - started <= dt.timedelta(minutes=DECISION_STALE_MINUTES):
+        findings.append(Finding("見張り役", "info", f"起動した（{started:%H:%M}）。最初の判断の回を待っている",
+                                "なし（起動から数分で最初の回が回る）", "なし"))
     elif ok_cycle is None or now - ok_cycle > dt.timedelta(minutes=DECISION_STALE_MINUTES):
-        findings.append(Finding("見張り役", "bad", "判断の回が実際の口座に届いていない（キー・IP の制限など）"))
+        findings.append(Finding("見張り役", "bad", "判断の回が実際の口座に届いていない",
+                                "見張り役の判断が発注に届かない。" + covered,
+                                "GMOコインの注文用のキーの IP 制限に 136.64.73.92 が入っているか確かめる。入っていれば Claude に伝える"))
     else:
-        findings.append(Finding("見張り役", "ok", f"動いている（版 {watch.get('version') or '?'}・{watch.get('cycles', 0)}回）"))
+        findings.append(Finding("見張り役", "ok", f"動いている（版 {watch.get('version') or '?'}・最後の回 {ok_cycle:%H:%M}）"))
 
     # 判断する者
     for name in accounts:
         h = decider_health(live_events, name, now, market_open=is_open)
-        findings.append(Finding(name, h["state"], h["text"]))
+        impact, action = "", ""
+        if h["state"] == "bad" and h["text"].startswith("判断の回が止まっている"):
+            impact = "新しく建てる・閉じる判断が出ない。建玉は GMOコイン側の損切り・利確で守られている"
+            action = "見張り役とジョブの両方が止まっている。Claude に伝える"
+        elif h["state"] == "bad":
+            impact = ("AI が判断しないので、AI の口座は新しく建てない・閉じない（持っている建玉は損切り・利確で守られている）"
+                      if name == "ai" else "このロジックの口座は判断できない（持っている建玉は損切り・利確で守られている）")
+            action = "表示された理由を Claude に伝える（設定や権限の不具合のことが多い）"
+        elif h["state"] == "warn":
+            impact = "たまに失敗しているが、そのあと判断できている"
+            action = "続くようなら Claude に伝える"
+        findings.append(Finding(name, h["state"], h["text"], impact, action))
 
     # 口座
     if not live_enabled:
-        findings.append(Finding("自動売買", "warn", "有効になっていない（fx_live_enabled）"))
+        findings.append(Finding("自動売買", "warn", "有効になっていない（fx_live_enabled）", "実際の売買をしない",
+                                "売買させるなら infra/terraform.tfvars の fx_live_enabled = true で反映する"))
     elif killed:
-        findings.append(Finding("自動売買", "bad", "キルスイッチが入っている（新しく建てない）"))
+        findings.append(Finding("自動売買", "bad", "キルスイッチが入っている", "新しく建てない（決済はする）",
+                                "自分で入れたならそのまま。再開するなら「操作」の画面でキルスイッチを切る"))
     ready = next((e for e in reversed(live_events) if e.get("kind") == "live_ready"), None)
     if ready is not None and not ready.get("ok"):
-        findings.append(Finding("口座", "bad", f"照会できない（{str(ready.get('note', ''))[:80]}）"))
+        findings.append(Finding("口座", "bad", f"GMOコインの口座を照会できない（{str(ready.get('note', ''))[:80]}）",
+                                "判断が発注に届かない。建玉は GMOコイン側の損切り・利確で守られている",
+                                "ERR-5012 ならキーの権限か IP 制限。それ以外は Claude に伝える"))
     errors = [e for e in live_events if e.get("kind") in ("live_error", "error")
               and (t := _at(e.get("at"))) and now - t <= ERROR_WINDOW]
     if errors:
         last = errors[-1]
         text = str(last.get("error") or last.get("errors") or "")[:80]
-        findings.append(Finding("口座", "warn", f"直近1時間に{len(errors)}回エラー（最後: {text}）"))
+        findings.append(Finding("口座", "warn", f"直近1時間に{len(errors)}回エラー（最後: {text}）",
+                                "その回は照会・発注ができなかった。次の回でやり直す", "続くようなら Claude に伝える"))
 
     if paper_paused:
-        findings.append(Finding("ペーパー運用", "info", "止めている（実際の売買には関係ない）"))
+        findings.append(Finding("ペーパー運用", "info", "止めている", "実際の売買には関係ない",
+                                "比べたいなら「操作」の画面で再開する"))
 
     order = {"bad": 0, "warn": 1, "info": 2, "ok": 3}
     return sorted(findings, key=lambda f: order.get(f.state, 9))
