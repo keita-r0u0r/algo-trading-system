@@ -139,3 +139,33 @@ def test_ai_next_looks_lists_every_trigger():
     assert looks[0] == "定期: 21:41 ごろ（15分ごと）"
     assert "212.047 に下がったら" in looks[1] and "212.587 に上がったら" in looks[2]
     assert looks[-1] == "時間帯の切り替わり: 22:00"
+
+
+def test_month_outlook_projects_pace_and_needs_data_for_chance():
+    import datetime as dt
+
+    from jqbt.interfaces import viewmodels as vm
+
+    jst = dt.timezone(dt.timedelta(hours=9))
+    pts = [(dt.datetime(2026, 11, 2, 19, 0, tzinfo=jst), 10_000.0), (dt.datetime(2026, 11, 3, 19, 0, tzinfo=jst), 10_100.0)]
+    o = vm.month_outlook(pts, dt.datetime(2026, 11, 3, 19, 0, tzinfo=jst))
+    assert o["goal"] == 15_000 and o["elapsed_days"] == 1.0
+    assert abs(o["daily_pace"] - 0.01) < 1e-9 and o["projected"] > o["current"]
+    assert "chance" not in o  # 1日分では確からしさを出さない
+    days = [dt.datetime(2026, 11, d, 23, 0, tzinfo=jst) for d in (2, 3, 4, 5, 6, 9, 10)]
+    pts = [(t, 10_000 * 1.02 ** i) for i, t in enumerate(days)]
+    o = vm.month_outlook(pts, days[-1])
+    assert 0 <= o["chance"] <= 1 and o["days_of_data"] >= 5
+
+
+def test_monthly_ai_cost():
+    import datetime as dt
+
+    from jqbt.interfaces import viewmodels as vm
+
+    jst = dt.timezone(dt.timedelta(hours=9))
+    recs = [{"kind": "call", "at": "2026-11-02T01:00:00+00:00", "cost_usd": 0.1},
+            {"kind": "call", "at": "2026-10-30T01:00:00+00:00", "cost_usd": 9.0},
+            {"kind": "rating", "at": "2026-11-02T01:00:00+00:00"}]
+    c = vm.monthly_ai_cost(recs, dt.datetime(2026, 11, 3, 0, 0, tzinfo=jst))
+    assert abs(c["spent"] - 0.1) < 1e-9 and c["projected"] > c["spent"]

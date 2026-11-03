@@ -290,3 +290,63 @@ def ai_next_looks(row: dict[str, Any], price: float | None, now: dt.datetime, ai
     if next_session:
         looks.append(f"時間帯の切り替わり: {next_session}")
     return looks
+
+
+def _business_days(start: dt.datetime, end: dt.datetime) -> float:
+    """start から end までの平日の日数（端は時刻の割合で数える）。"""
+    days, t = 0.0, start
+    while t < end:
+        nxt = min(end, (t + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
+        if t.weekday() < 5:
+            days += (nxt - t).total_seconds() / 86400
+        t = nxt
+    return days
+
+
+def month_outlook(points: Sequence[tuple[dt.datetime, float]], now: dt.datetime, *, target: float = 1.5) -> dict[str, Any]:
+    """今月の目標（月初の評価額 × target）に対する、今のペースでの月末の見込みと、届く確からしさ。
+
+    見込みは「月初から今までの平日1日あたりの伸び」を残りの平日に伸ばしたもの。確からしさは、日ごとの伸びの
+    ばらつきから「月末に目標以上になる割合」を見積もる（平日5日分より少ないと、出さない）。
+    """
+    import math
+
+    month = [(t, v) for t, v in points if v > 0 and (t.year, t.month) == (now.year, now.month)]
+    if not month:
+        return {}
+    start_at, start = month[0]
+    current = month[-1][1]
+    end = (now.replace(day=28) + dt.timedelta(days=4)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elapsed, remaining = _business_days(start_at, now), _business_days(now, end)
+    goal = start * target
+    out = {"start": start, "start_at": start_at, "current": current, "goal": goal,
+           "elapsed_days": round(elapsed, 1), "remaining_days": round(remaining, 1),
+           "required_daily": (goal / current) ** (1 / remaining) - 1 if remaining > 0 and current > 0 else None}
+    pace = (current / start) ** (1 / elapsed) if elapsed >= 0.5 else None
+    out["daily_pace"] = pace - 1 if pace else None
+    out["projected"] = current * pace ** remaining if pace else None
+    closes: dict[dt.date, float] = {}
+    for t, v in month:
+        if t.weekday() < 5:
+            closes[t.date()] = v
+    values = [start] + list(closes.values())
+    rets = [math.log(b / a) for a, b in zip(values, values[1:]) if a > 0 and b > 0]
+    out["days_of_data"] = len(rets)
+    if len(rets) >= 5 and remaining > 0:
+        mu = sum(rets) / len(rets)
+        sd = (sum((r - mu) ** 2 for r in rets) / (len(rets) - 1)) ** 0.5
+        if sd > 0:
+            z = (math.log(goal / current) - mu * remaining) / (sd * math.sqrt(remaining))
+            out["chance"] = 0.5 * math.erfc(z / math.sqrt(2))
+    return out
+
+
+def monthly_ai_cost(records: Sequence[dict[str, Any]], now: dt.datetime) -> dict[str, float]:
+    """今月の AI の費用（実績）と、今のペースでの月末の見込み（日本時間の月で数える）。"""
+    spent = sum(float(r.get("cost_usd") or 0) for r in records
+                if r.get("kind", "call") == "call" and r.get("at")
+                and (t := dt.datetime.fromisoformat(r["at"]).astimezone(JST)).year == now.year and t.month == now.month)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = (now.replace(day=28) + dt.timedelta(days=4)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elapsed, total = _business_days(start, now), _business_days(start, end)
+    return {"spent": spent, "projected": spent / elapsed * total if elapsed > 0.2 else spent}
