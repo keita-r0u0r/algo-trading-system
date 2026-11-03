@@ -90,3 +90,25 @@ def test_ai_skip_reason_says_when_and_why(state):
     assert "12:00（5分前）" in text and "12:15 ごろ" in text and "急変" in text
     [(decision, _, extra)] = rt.decide("ai", None, ctx, [])
     assert decision == {"action": "hold"} and extra["note"] == text
+
+
+def test_plan_when_opened_is_found_for_paper_and_live():
+    from jqbt.application.fx_paper import PaperPosition
+
+    now = dt.datetime(2026, 11, 3, 13, 0, tzinfo=JST)
+    decision = {"action": "open_long", "symbol": "USD_JPY", "reasoning": "金利差と1時間足の上抜け",
+                "exit_condition": "1時間足の終値が 157.80 を下回ったら", "hold_minutes": 120, "stop_pips": 10}
+    live = [{"kind": "live_decision", "account": "ai", "at": "2026-11-03T12:40:00+09:00", "approved": True,
+             "decision": decision},
+            {"kind": "live_decision", "account": "ai", "at": "2026-11-03T12:45:00+09:00", "approved": False,
+             "decision": {"action": "hold"}}]
+    position = PaperPosition("USD_JPY", 991, 157.933, 157.833, 158.133, "2026-11-03T12:40:54+09:00", "")
+    plan = rt.plan_when_opened("ai", position, live, now)
+    assert plan["exit_condition"].startswith("1時間足") and plan["hold_minutes"] == 120 and plan["minutes_held"] == 19
+    # 建玉より後の判断や、別の通貨ペア・通らなかった判断は使わない
+    later = [{**live[0], "at": "2026-11-03T12:50:00+09:00"}]
+    assert rt.plan_when_opened("ai", position, later, now) is None
+    paper = [{"kind": "decision", "account": "ai", "at": "2026-11-03T12:40:00+09:00", "approved": True,
+              "decision": {**decision, "symbol": "EUR_JPY"}}]
+    assert rt.plan_when_opened("ai", position, paper, now) is None
+    assert rt.plan_when_opened("ai", None, live, now) is None

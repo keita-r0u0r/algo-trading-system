@@ -53,7 +53,7 @@ SYSTEM = """あなたは、個人が使う売買ルールの検証と少額運�
 #: E（FX の判断）だけの前提。検証向けの SYSTEM は「優位性は無い」「良い成績は疑う」と慎重なので、
 #: 判断がいつも見送りに寄った（2026-10-21 の記録で4回とも hold）。判断役には、枠の中で機会を探す役目を与える。
 #: 文面を変えたら FX_PROMPT_VERSION を上げる（記録を版ごとに分けて比べるため）
-FX_PROMPT_VERSION = "fx-v4"
+FX_PROMPT_VERSION = "fx-v5"
 FX_SYSTEM = """あなたは、個人の FX の自動売買で売買を判断する役です。口座は、実際のお金の口座（goal が書いてある）か、
 ペーパー運用（仮想の約定）のどちらか。判断は、定期（15分ごと）と、値段の見張り役が急変などで起こしたとき
 （market.wake_reason に理由が書いてある）に来ます。
@@ -71,6 +71,19 @@ FX_SYSTEM = """あなたは、個人の FX の自動売買で売買を判断す�
   自分で値段から計算し直さず、その数字を使う。円の通貨ペアでは 1 pip = 0.01円
 - あなたの学習データに含まれる期間の値動きの知識は使わない
 - 根拠は、どのデータのどの動きを見たかが分かるように書く（あとで値動きと照らし合わせて振り返る）
+
+建てるとき（open_long / open_short）:
+- 何を見て建てるか（reasoning）に加えて、どうなったら閉じるか（exit_condition）と、どれくらい持つつもりか
+  （hold_minutes）を必ず決める。exit_condition は、あとで値段と照らして当てはまるか判断できる具体的な形で書く
+  （例:「1時間足の終値が 157.80 を下回ったら」「ニューヨークの時間帯（22:00）までに 158.10 に届かなければ」）
+
+建玉を持っているとき:
+- account.position.plan_when_opened に、建てたときの自分の計画（根拠・閉じる条件・保有の目安・経過した分）がある
+- 閉じる（close）のは、閉じる条件に当てはまったとき、建てた根拠がはっきり崩れたとき、保有の目安を大きく過ぎても
+  動かないときだけ。少し逆に動いた・方向感がない・様子見したい、は閉じる理由にしない（損切り・利確に任せる）。
+  建ててすぐ閉じると、毎回コスト（往復約1 pip）だけを払うことになる
+- 閉じるなら、計画のどれに当てはまったかを reasoning に書く。持ち続けるなら、計画がまだ生きている理由を書く
+- 持っていないときは、exit_condition は空、hold_minutes は 0 でよい
 
 答え方:
 - 日本語で、平易に
@@ -183,9 +196,11 @@ FX_DECISION_SCHEMA: dict[str, Any] = {
         "horizon": {"type": "string"},
         "reasoning": {"type": "string"},
         "risks": {"type": "string"},
+        "exit_condition": {"type": "string"},
+        "hold_minutes": {"type": "number"},
     },
     "required": ["action", "symbol", "risk_fraction", "stop_pips", "take_pips", "confidence", "horizon",
-                 "reasoning", "risks"],
+                 "reasoning", "risks", "exit_condition", "hold_minutes"],
     "additionalProperties": False,
 }
 
