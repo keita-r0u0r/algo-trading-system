@@ -27,7 +27,7 @@ def test_fade_sells_after_a_jump_and_takes_profit_after_spread():
     opened, closed = events
     assert opened["side"] == "SELL" and opened["price"] == 158.060 and opened["take"] == 158.030
     assert closed["reason"] == "利確" and closed["pips"] == 3.0
-    assert closed["pnl"] < 30.0 and closed["fee"] > 0  # 1,000通貨 × 3 pips = 30円 から手数料を引く
+    assert closed["pnl"] == 30.0 and closed["fee"] == 0  # 1,000通貨 × 3 pips = 30円（手数料は0円）
 
 
 def test_follow_buys_and_stops_out():
@@ -56,3 +56,15 @@ def test_restore_and_summary():
     assert round(again.cash, 2) == round(account.cash, 2) and again.trades == 1 and again.wins == 1
     s = summary(events, RULES[0].name)
     assert s["trades"] == 1 and s["win_rate"] == 1.0 and s["avg_pips"] == 3.0
+
+
+def test_old_fee_is_given_back():
+    """scalp-v1 で誤って引いた手数料は、成績と口座の作り直しで戻す。"""
+    events = [{"kind": "scalp_close", "account": "scalp_fade", "pnl": -4.41, "fee": 4.41, "pips": 0.0,
+               "cash": 9995.59, "version": "scalp-v1"},
+              {"kind": "scalp_close", "account": "scalp_fade", "pnl": 30.0, "fee": 0.0, "pips": 3.0,
+               "cash": 10030.0, "version": "scalp-v2"}]
+    s = summary(events, "scalp_fade")
+    assert s["pnl"] == 30.0 and s["fees"] == 0
+    account = restore(RULES[0], events)
+    assert account.cash == 10030.0 and account.trades == 2 and account.wins == 1

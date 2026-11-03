@@ -12,7 +12,8 @@
 
 ## 約定の決まり（実運用と同じにする）
 
-  * 買いは ask、売りは bid で建て、閉じるときはその反対（スプレッドを払う）。手数料は約定代金の 0.002%
+  * 買いは ask、売りは bid で建て、閉じるときはその反対（スプレッドを払う）。手数料は0円（実際の約定記録の fee が0）。
+    scalp-v1 は誤って 0.002%（1,000通貨で往復 約4.4円）を引いていたので、成績ではその分を戻して数える
   * 損切り・利確は、値段が届いたその値段で約定したことにする（実際はずれることがある。甘めの見積もり）
   * スプレッドが ``max_spread_pips`` を超えるときは建てない。建玉は口座ごとに1つ。閉じたあと ``cooldown_seconds`` は建てない
 """
@@ -24,8 +25,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-SCALP_VERSION = "scalp-v1"
-FEE_RATE = 0.00002
+SCALP_VERSION = "scalp-v2"
+FEE_RATE = 0.0
 
 
 @dataclass(frozen=True)
@@ -154,22 +155,28 @@ def on_tick(account: ScalpAccount, window: TickWindow, symbol: str, at: dt.datet
     return events
 
 
+def _pnl(e: dict[str, Any]) -> float:
+    """閉じた記録の損益。scalp-v1 で誤って引いた手数料は戻す。"""
+    pnl = float(e.get("pnl", 0))
+    return pnl + float(e.get("fee", 0)) if e.get("version") == "scalp-v1" else pnl
+
+
 def restore(rule: ScalpRule, events: list[dict[str, Any]]) -> ScalpAccount:
     """記録から口座を作り直す（見張り役が作り直されても続きから）。閉じていない建玉は、作り直しのときに捨てる。"""
     account = ScalpAccount(rule)
     for e in events:
         if e.get("account") != rule.name or e.get("kind") != "scalp_close":
             continue
-        account.cash = float(e.get("cash", account.cash))
+        account.cash += _pnl(e)
         account.trades += 1
-        account.wins += int(float(e.get("pnl", 0)) > 0)
+        account.wins += int(_pnl(e) > 0)
     return account
 
 
 def summary(events: list[dict[str, Any]], name: str) -> dict[str, Any]:
     """成績（画面に出す）。"""
     closes = [e for e in events if e.get("kind") == "scalp_close" and e.get("account") == name]
-    pnl = [float(e["pnl"]) for e in closes]
+    pnl = [_pnl(e) for e in closes]
     pips = [float(e["pips"]) for e in closes]
     wins = [x for x in pnl if x > 0]
     losses = [x for x in pnl if x <= 0]
@@ -181,6 +188,6 @@ def summary(events: list[dict[str, Any]], name: str) -> dict[str, Any]:
         "avg_pips": round(sum(pips) / len(pips), 2) if pips else None,
         "avg_win": round(sum(wins) / len(wins), 1) if wins else None,
         "avg_loss": round(sum(losses) / len(losses), 1) if losses else None,
-        "fees": round(sum(float(e.get("fee", 0)) for e in closes), 1),
+        "fees": round(sum(float(e.get("fee", 0)) for e in closes if e.get("version") != "scalp-v1"), 1),
         "by_reason": {r: sum(1 for e in closes if e.get("reason") == r) for r in sorted({e.get("reason") for e in closes})},
     }
