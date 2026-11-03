@@ -237,3 +237,19 @@ def test_release_rows_are_newest_first_with_changes():
     assert [r["version"] for r in rows] == ["b", "a"]
     assert rows[0]["changes"] == [{"pr": 52, "title": "題", "body": "- 中身"}]
     assert rows[1]["changes"][0]["title"] == ""
+
+
+def test_blocked_opens_lists_recent_rejected_entries():
+    import datetime as dt
+
+    from jqbt.interfaces import viewmodels as vm
+
+    jst = dt.timezone(dt.timedelta(hours=9))
+    events = [{"kind": "live_decision", "at": "2026-11-04T06:40:00+09:00", "account": "ai", "approved": False,
+               "decision": {"action": "open_short", "symbol": "EUR_JPY"}, "rejected": "古い"},
+              {"kind": "live_decision", "at": "2026-11-04T07:55:00+09:00", "account": "ai", "approved": False,
+               "decision": {"action": "open_short", "symbol": "GBP_JPY"}, "rejected": "スプレッドが広い（17.9 pips > 1）"},
+              {"kind": "live_decision", "at": "2026-11-04T08:00:00+09:00", "account": "ai", "approved": False,
+               "decision": {"action": "hold"}}]
+    rows = vm.blocked_opens(events, dt.datetime(2026, 11, 4, 8, 10, tzinfo=jst))
+    assert [r["symbol"] for r in rows] == ["GBP_JPY"] and "スプレッド" in rows[0]["reason"]

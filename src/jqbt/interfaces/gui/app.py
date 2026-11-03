@@ -1139,6 +1139,14 @@ def live_overview() -> None:
     price_strip(prices)
     events = live_log()
     kpi_strip(events, prices)
+    blocked = vm.blocked_opens(events, dt.datetime.now(JST))
+    if blocked:
+        latest = blocked[0]
+        st.warning(f"直近1時間で、建てようとして通らなかった判断が {len(blocked)} 回あります。最新: "
+                   f"{latest['at']:%H:%M} {vm.account_label(latest['account'])} の "
+                   f"{vm.PAIR_LABELS.get(latest['symbol'], latest['symbol'])} "
+                   f"{'買い' if latest['action'] == 'open_long' else '売り'} → {latest['reason']}"
+                   "（朝7〜9時はスプレッドが広がりやすい。詳しくは「判断の記録」）", icon=":material/block:")
     health_panel(events)
     watch_panel(events)
     ai_consult_panel(events, prices)

@@ -337,6 +337,26 @@ def filter_shadow_rows(events: Sequence[dict[str, Any]], account: str = "harness
     return rows
 
 
+def blocked_opens(events: Sequence[dict[str, Any]], now: dt.datetime, minutes: int = 60) -> list[dict[str, Any]]:
+    """直近 ``minutes`` 分に、判断する者が建てようとして枠や安全装置で通らなかった判断（新しい順）。"""
+    since = now - dt.timedelta(minutes=minutes)
+    rows = []
+    for e in reversed(events):
+        if e.get("kind") != "live_decision":
+            continue
+        try:
+            at = dt.datetime.fromisoformat(str(e.get("at")))
+        except ValueError:
+            continue
+        if at < since:
+            break
+        d = e.get("decision") or {}
+        if str(d.get("action", "")).startswith("open") and not e.get("approved"):
+            rows.append({"at": at, "account": e.get("account", ""), "symbol": d.get("symbol", ""),
+                         "action": d.get("action"), "reason": e.get("rejected") or e.get("note") or ""})
+    return rows
+
+
 def parse_changelog(text: str) -> dict[int, dict[str, str]]:
     """CHANGELOG.md を PR 番号ごとの {date, title, body} にする（見出しは「## #52 · 2026-11-04 · 題」）。"""
     entries: dict[int, dict[str, str]] = {}
