@@ -289,8 +289,9 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *
             context["market"]["wake_reason"] = f"見張り役がこの回を起こした理由: {ctx.trigger}"
         try:
             reply = ctx.ai.fx_decide(context, now.date())
-        except Exception as exc:  # AI が使えなくても、他は進める
-            return [({"action": "hold"}, "", {"error": str(exc)[:300]})]
+        except Exception as exc:  # AI が使えなくても、他は進める（理由は記録に残す）
+            print(f"AI を呼べなかった: {type(exc).__name__}: {str(exc)[:300]}", flush=True)
+            return [({"action": "hold"}, "", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"})]
         data = reply.data or {}
         extra = {"model": reply.model, "call_id": reply.call_id, "confidence": data.get("confidence"),
                  "trigger": ctx.trigger,
@@ -527,7 +528,8 @@ def trade_live(ctx: "Context") -> bool:
                                    "decision": {k: v for k, v in decision.items() if k != "context"},
                                    "approved": approved is not None, "rejected": rejected,
                                    **{k: v for k, v in extra.items() if k in ("logic", "model", "prompt_version",
-                                                                             "confidence", "reused")}})
+                                                                             "confidence", "reused", "error", "note",
+                                                                             "trigger")}})
             if approved is None:
                 continue
             intents.append(Intent(account=name, action="close" if approved.action == "close" else "open",
