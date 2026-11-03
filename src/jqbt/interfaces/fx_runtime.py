@@ -206,6 +206,37 @@ def position_numbers(p, quote: dict | None, pip: float = 0.01) -> dict:
     return numbers
 
 
+def plan_when_opened(name: str, position, events: list[dict], now: dt.datetime) -> dict | None:
+    """今の建玉を建てたときの、判断する者の計画（根拠・閉じる条件・保有の目安）。記録から探す。
+
+    AI は呼ばれるたびにゼロから考え直すので、渡さないと、15分の細かい揺れで建ててすぐ閉じてしまう（コスト負け）。
+    建玉の時刻より前で、同じ通貨ペアを建てると決めて通った、いちばん新しい判断を使う。
+    """
+    if position is None:
+        return None
+    try:
+        opened = dt.datetime.fromisoformat(str(position.opened_at))
+    except ValueError:
+        opened = None
+    for e in reversed(events):
+        d = e.get("decision") or {}
+        if (e.get("kind") in ("decision", "live_decision") and e.get("account") == name and e.get("approved")
+                and str(d.get("action", "")).startswith("open") and d.get("symbol") == position.symbol):
+            try:
+                at = dt.datetime.fromisoformat(str(e.get("at")))
+            except ValueError:
+                continue
+            if opened is not None and at > opened:
+                continue
+            start = opened or at
+            return {"opened_at": start.isoformat(timespec="minutes"),
+                    "minutes_held": int((now - start).total_seconds() // 60),
+                    "reasoning": d.get("reasoning", ""), "exit_condition": d.get("exit_condition", ""),
+                    "hold_minutes": d.get("hold_minutes"), "confidence": d.get("confidence"),
+                    "stop_pips": d.get("stop_pips"), "take_pips": d.get("take_pips")}
+    return None
+
+
 def ai_context(account: PaperAccount, frame: TradingFrame, quotes: dict, bars: dict, now: dt.datetime,
                events: list[dict], today_rates: dict) -> dict:
     p = account.position
@@ -237,7 +268,11 @@ def ai_context(account: PaperAccount, frame: TradingFrame, quotes: dict, bars: d
             "equity": round(mark(account, quotes[p.symbol]["bid"], quotes[p.symbol]["ask"]) if p else account.cash, 1),
             "day_start_equity": round(account.day_start_equity or account.cash, 1),
             "halted_today": account.halted_session == account.session,
-            "position": None if p is None else position_numbers(p, quotes.get(p.symbol)),
+            "position": None if p is None else {
+                **position_numbers(p, quotes.get(p.symbol)),
+                "plan_when_opened": plan_when_opened(account.name, p, events, now)
+                or "記録が無い（計画を残す前に建てた建玉）。損切り・利確に任せるのを基本にする",
+            },
             "recent_closed_trades": [
                 {"symbol": e["symbol"], "pnl_yen": round(e["pnl"], 1), "reason": e["reason"], "closed_at": e["at"]}
                 for e in closes
@@ -569,7 +604,7 @@ def trade_live(ctx: "Context") -> bool:
     for name in session.config.accounts:
         view = live_view(name, session)
         account_frame = ctx.live_frame
-        for decision, reason, extra in decide(name, view, ctx, [], live=True):
+        for decision, reason, extra in decide(name, view, ctx, session.log + session.events, live=True):
             equity = session.equity
             approved, rejected = check(
                 decision, account_frame, equity=equity, holding=view.position.symbol if view.position else None,

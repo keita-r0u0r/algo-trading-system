@@ -1050,6 +1050,9 @@ def live_decisions() -> None:
         "リスク": f"資金の{float((e.get('decision') or {}).get('risk_fraction') or (e.get('logic') or {}).get('risk_fraction') or 0):.1%}"
         if str((e.get("decision") or {}).get("action", "")).startswith("open") else "",
         "自信": {"high": "高い", "medium": "中くらい", "low": "低い"}.get((e.get("decision") or {}).get("confidence"), ""),
+        "閉じる条件": (e.get("decision") or {}).get("exit_condition", "") or "",
+        "保有の目安": f"{(e.get('decision') or {}).get('hold_minutes'):.0f}分"
+        if (e.get("decision") or {}).get("hold_minutes") else "",
         "気にしていること": (e.get("decision") or {}).get("risks", "") or "",
         "起こした理由": e.get("trigger", "") or "",
     } for e, h in reversed(rows)][:300])
