@@ -51,7 +51,17 @@ def reader():
 
 
 def after(events: list[dict], kind: str, account: str, since: str) -> list[dict]:
-    return [e for e in events if e.get("kind") == kind and e.get("account") == account and str(e.get("at")) >= since]
+    """``since`` より後に **記録された** 出来事。判断の時刻（at）は分で切り捨てなので、記録した時刻（logged_at）で比べる。"""
+    start = dt.datetime.fromisoformat(since) if since else None
+
+    def logged(e: dict) -> dt.datetime | None:
+        try:
+            return dt.datetime.fromisoformat(str(e.get("logged_at") or e.get("at")))
+        except ValueError:
+            return None
+
+    return [e for e in events if e.get("kind") == kind and e.get("account") == account
+            and (start is None or ((t := logged(e)) is not None and t >= start))]
 
 
 def check_once(read, exists, version: str | None) -> tuple[str, list[str]]:
