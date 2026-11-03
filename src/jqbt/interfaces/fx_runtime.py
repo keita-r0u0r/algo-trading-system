@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 import pandas as pd
 
-from ..application import fx_calendar, fx_exits, fx_features, fx_filter, fx_setups, fx_sizing
+from ..application import fx_calendar, fx_exits, fx_features, fx_filter, fx_jev, fx_setups, fx_sizing
 from ..application.fx_live_trade import Intent, LiveConfig, book_from_events
 from ..application.fx_paper import (
     PaperAccount,
@@ -396,6 +396,8 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *
         return [(data, f"AI {reply.model}: {data.get('reasoning', '')}", extra)]
     if name == "harness":
         return [harness_decision(account, ctx, events)]
+    if name == "jev":
+        return [jev_decision(account, ctx, events)]
     if name == "rule_hourly_breakout":
         h = hourly(bars[BASE], now)
         want = hourly_breakout_target(h)
@@ -481,7 +483,8 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
         gap = (now.date() - held_since[sym]).days + 1 if sym in held_since else 0
         bars[sym] = recent_bars(api, sym, now, min(max(gap, BARS_DAYS), MAX_GAP_DAYS))
     settings = load_settings()
-    uses_jev = (settings.filter.mode != "off" and settings.filter.provider == "jev") or settings.exits.selector == "jev"
+    uses_jev = ((settings.filter.mode != "off" and settings.filter.provider == "jev") or settings.exits.selector == "jev"
+                or settings.enabled("jev"))
     jev = typesafe.jev_from_secrets() if uses_jev else None
     return Context(api=api, now=now, frame=frame, carry_frame=carry_frame, live_frame=live_frame, insts=insts, quotes=quotes, bars=bars,
                    ai=ai, today_rates=rates_summary(now.date()) if ai is not None else {},
@@ -623,6 +626,101 @@ def harness_decision(account: PaperAccount, ctx: "Context", events: list[dict]) 
     if not ok:
         return {"action": "hold"}, "", {"logic": logic, "note": note}
     return decision, "決まり: " + decision["reasoning"], {"logic": logic, "note": note}
+
+
+JEV_RULES = fx_jev.JevRules()
+
+
+def ask_jev(ctx: "Context", state: dict, questions: dict) -> dict:
+    """Jev に聞いて、使った分を記録する。"""
+    if ctx.jev is None:
+        raise RuntimeError("Jev のキーが置いていない（Secret Manager の typesafe-api-key）")
+    response = ctx.jev.ask(state, questions)
+    usage = response.get("usage") or {}
+    typesafe.log_usage(JEV_USAGE, {"at": ctx.now.isoformat(), "model": response.get("model"), **usage,
+                                   "cost_usd": fx_filter.jev_cost_usd(usage)})
+    return response
+
+
+def evaluate(ctx: "Context", by: str, decision: dict, market: dict) -> dict | None:
+    """判断を別の AI に評価させる（記録だけ。売買は止めない）。モデルは AI の設定の「F 判断の評価」。"""
+    if not ctx.settings.evaluate or ctx.ai is None or not hasattr(ctx.ai, "fx_evaluate"):
+        return None
+    try:
+        reply = ctx.ai.fx_evaluate({"decision": {"by": by, **decision}, "market": market}, ctx.now.date())
+        return {"model": reply.model, **(reply.data or {})}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+
+def jev_decision(account: PaperAccount, ctx: "Context", events: list[dict]) -> tuple[dict, str, dict]:
+    """Jev が判断する: 向き・通貨ペア・リスクの大きさ・決済の手法。損切り幅と降りる線は機械が引く。"""
+    record = {"rule": "Jev が向き・通貨ペア・リスク（4段階）・決済の手法を選ぶ。損切り幅は1時間足の揺れから機械が決め、"
+                      "降りる線は選んだ決済の手法で機械が引く。持っている間は、持つ理由が無くなったかを毎回 Jev に聞く",
+              "version": fx_jev.JEV_VERSION}
+    symbols = [s for s in ctx.live_frame.symbols if s in ctx.bars]
+    features = {s: features_of(ctx, s) for s in symbols}
+    calendar = fx_calendar.upcoming(ctx.calendar, ctx.now, symbols)
+    notes = active_notes(ctx.now)
+    p = account.position
+    if p is not None:
+        side = 1 if p.units > 0 else -1
+        quote, bars = ctx.quotes.get(p.symbol), ctx.bars.get(p.symbol)
+        if quote is None or not p.price or bars is None:
+            return {"action": "hold"}, "", {"logic": record, "note": f"{p.symbol} の値段が取れない"}
+        try:
+            opened = dt.datetime.fromisoformat(str(p.opened_at))
+        except ValueError:
+            opened = ctx.now
+        method = (plan_when_opened("jev", p, events, ctx.now) or {}).get("exit_method") or "chandelier"
+        price = (quote["bid"] + quote["ask"]) / 2
+        stop = abs(p.price - p.stop) / 0.01 if p.stop else JEV_RULES.min_stop_pips
+        result = fx_setups.exit_check(side=side, entry_price=p.price, stop_pips=stop, price=price, bars=bars,
+                                      opened_at=opened, now=ctx.now, f=None, method=method,
+                                      rules=replace(HARNESS, hold_minutes=JEV_RULES.hold_minutes))
+        logic = {**record, "symbol": p.symbol, "exit_method": method, "exit_level": result.exit_level,
+                 "peak_pips": round(result.peak_pips, 1), "unrealized_pips": round(result.unrealized_pips, 1),
+                 "evidence": result.evidence}
+        reason = result.reason if result.close else ""
+        if not result.close:
+            try:
+                position = {"symbol": p.symbol, "side": "long" if side > 0 else "short",
+                            "unrealized_pips": round(result.unrealized_pips, 1), "peak_pips": round(result.peak_pips, 1),
+                            "minutes_held": int((ctx.now - opened).total_seconds() // 60)}
+                close, prob = fx_jev.read_hold(ask_jev(ctx, fx_jev.market_state(features, calendar, notes, position),
+                                                       fx_jev.hold_questions()), JEV_RULES)
+                logic["jev_close_probability"] = prob
+                if close:
+                    reason = f"Jev: 持つ理由が無くなった（確からしさ {prob:.0%}）"
+            except Exception as exc:  # noqa: BLE001  聞けなくても、機械の降りる線と損切りは効いている
+                logic["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        if not reason:
+            return {"action": "hold"}, "", {"logic": logic}
+        decision = {"action": "close", "reasoning": reason}
+        logic["evaluation"] = evaluate(ctx, "jev", {**decision, "position": logic["evidence"]},
+                                       {"features": features.get(p.symbol), "calendar": calendar})
+        return decision, "Jev: " + reason, {"logic": logic}
+    try:
+        response = ask_jev(ctx, fx_jev.market_state(features, calendar, notes), fx_jev.entry_questions(symbols))
+    except Exception as exc:  # noqa: BLE001
+        return {"action": "hold"}, "", {"logic": record, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    entry = fx_jev.read_entry(response, JEV_RULES)
+    logic = {**record, "jev": {k: entry.get(k) for k in ("choice", "probability", "confidence", "risk_fraction", "exit_method")},
+             "jev_model": response.get("model")}
+    if not entry["open"] or entry["symbol"] not in features:
+        return {"action": "hold"}, "", {"logic": logic, "note": entry["why"]}
+    f = features[entry["symbol"]]
+    stop = fx_jev.stop_pips(fx_setups._get(f, "timeframes", "1h", "atr_pips"), JEV_RULES)
+    take = round(stop * HARNESS.exits.take_for(entry["exit_method"]), 1)
+    price = f.get("price") or 0.0
+    decision = {"action": "open_long" if entry["side"] > 0 else "open_short", "symbol": entry["symbol"],
+                "risk_fraction": min(entry["risk_fraction"], ctx.settings.sizing_for("jev").max_risk),
+                "stop_pips": stop, "take_pips": take, "setup": "jev", "exit_method": entry["exit_method"],
+                "invalidation_price": round(price - entry["side"] * stop * 0.01, 3),
+                "target_price": round(price + entry["side"] * take * 0.01, 3) if take else None,
+                "hold_minutes": JEV_RULES.hold_minutes, "reasoning": entry["why"]}
+    logic["evaluation"] = evaluate(ctx, "jev", decision, {"features": f, "calendar": calendar, "notes": notes})
+    return decision, "Jev: " + entry["why"], {"logic": logic}
 
 
 SIZING_PROPOSALS = STATE / "fx_sizing_proposals.jsonl"
@@ -827,8 +925,8 @@ def ai_due(trigger: str) -> bool:
         last = dt.datetime.fromisoformat(AI_LAST.read_text(encoding="utf-8").strip()) if AI_LAST.exists() else None
     except ValueError:
         last = None
-    # 決まりが決済を持つ建玉（harness）だけの理由で起こされた回では、AI は呼ばない（費用と、AI の判断を混ぜないため）
-    for_ai = bool(trigger) and "harness の建玉" not in trigger
+    # 機械が決済の線を持つ建玉（harness・jev）だけの理由で起こされた回では、AI は呼ばない（費用と、判断を混ぜないため）
+    for_ai = bool(trigger) and not any(f"{name} の建玉" in trigger for name in ("harness", "jev"))
     due = for_ai or last is None or (now - last).total_seconds() >= AI_INTERVAL_SECONDS - 60
     if due:
         try:
@@ -853,7 +951,7 @@ def live_watch_rows(events: list[dict]) -> list[dict]:
         row = {"venue": "live", "account": p.account, "symbol": p.symbol, "stop": p.stop, "take": p.take,
                "price": p.price, "side": p.side, "opened_at": p.opened_at,
                "thesis": {k: plan.get(k) for k in ("invalidation_price", "target_price", "hold_minutes", "setup")}}
-        if p.account == "harness":  # 決済は決まりが持つ。見張り役は、決まりが最後に出した「利益を守る線」を見る
+        if p.account in ("harness", "jev"):  # 降りる線は機械が引く。見張り役は、最後に出した線だけを見る
             row["managed"] = "rules"
             row["exit_level"] = next((e["logic"].get("exit_level") for e in reversed(events)
                                       if e.get("kind") == "live_decision" and e.get("account") == p.account

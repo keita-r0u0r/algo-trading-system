@@ -113,4 +113,4 @@ def apply(settings: fx_filter.FxSettings, proposal: dict[str, Any], now: dt.date
         default = settings.sizing_for(c["account"])
         sizing[c["account"]] = fx_filter.clamp_sizing(c["to"]["max_units"], c["to"]["max_risk"], default)
     return fx_filter.FxSettings(settings.deciders, settings.filter, now.isoformat(timespec="seconds"),
-                                settings.exits, sizing)
+                                settings.exits, sizing, settings.evaluate)

@@ -153,6 +153,7 @@ def fx_summary_cards(summary: dict[str, Any]) -> list[dict[str, str]]:
 ACCOUNT_LABELS = {
     "ai": "AI",
     "harness": "ハーネス＋決まり",
+    "jev": "Jev",
     "rule_hourly_breakout": "1時間足の突破",
     "buy_and_hold": "買って持つだけ",
     "no_trade": "一切売買しない",
@@ -177,6 +178,8 @@ def account_kind(name: str) -> str:
         return "AI"
     if name == "harness":
         return "機械（AI・Jev は見送りだけ）"
+    if name == "jev":
+        return "Jev（損切り幅は機械）"
     return "基準" if name in ("buy_and_hold", "no_trade") else "機械"
 
 
@@ -331,6 +334,39 @@ def filter_shadow_rows(events: Sequence[dict[str, Any]], account: str = "harness
                      "provider": f.get("provider"), "skip_probability": f.get("skip_probability"),
                      "said_skip": f.get("veto"), "error": f.get("error"),
                      "pnl": round(pnl[int(o["position_id"])], 1) if int(o.get("position_id") or 0) in pnl else None})
+    return rows
+
+
+def parse_changelog(text: str) -> dict[int, dict[str, str]]:
+    """CHANGELOG.md を PR 番号ごとの {date, title, body} にする（見出しは「## #52 · 2026-11-04 · 題」）。"""
+    entries: dict[int, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for line in text.splitlines():
+        if line.startswith("## #"):
+            parts = [p.strip() for p in line[3:].split("·")]
+            try:
+                number = int(parts[0].lstrip("#"))
+            except ValueError:
+                current = None
+                continue
+            current = {"date": parts[1] if len(parts) > 1 else "", "title": parts[-1], "body": ""}
+            entries[number] = current
+        elif current is not None:
+            current["body"] += line + "\n"
+    for e in entries.values():
+        e["body"] = e["body"].strip()
+    return entries
+
+
+def release_rows(releases: Sequence[dict[str, Any]], changelog: dict[int, dict[str, str]]) -> list[dict[str, Any]]:
+    """反映の記録（state/releases.jsonl）を新しい順に、入った PR の題と中身つきで。"""
+    rows = []
+    for r in reversed(releases):
+        prs = [int(n) for n in r.get("prs") or []]
+        rows.append({"version": r.get("version"), "at": str(r.get("verified_at") or r.get("at") or ""),
+                     "result": r.get("result"), "previous": r.get("previous"), "note": r.get("note", ""),
+                     "changes": [{"pr": n, "title": changelog.get(n, {}).get("title") or (r.get("titles") or {}).get(str(n), ""),
+                                  "body": changelog.get(n, {}).get("body", "")} for n in prs]})
     return rows
 
 

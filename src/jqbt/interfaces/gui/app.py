@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import altair as alt
@@ -663,11 +664,13 @@ def decider_settings() -> None:
             method = d2.selectbox("決まった手法（選べなかったときも、これを使う）", list(fx_filter.EXIT_METHODS),
                                   index=list(fx_filter.EXIT_METHODS).index(current.exits.method),
                                   format_func=lambda m: f"{m}: {fx_filter.EXIT_METHODS[m]}")
+            evaluate_on = st.toggle("Jev の判断を別の AI に評価させて記録に残す（振り返り用。モデルは AI の設定の「F 判断の評価」）",
+                                    value=current.evaluate, key="evaluate-jev")
             if st.form_submit_button("保存", type="primary"):
-                rt.save_settings(fx_filter.FxSettings(
-                    deciders, fx_filter.FilterSettings(mode, provider, threshold),
-                    dt.datetime.now(JST).isoformat(timespec="seconds"), fx_filter.ExitSettings(selector, method),
-                    current.sizing))
+                rt.save_settings(replace(
+                    current, deciders=deciders, filter=fx_filter.FilterSettings(mode, provider, threshold),
+                    updated_at=dt.datetime.now(JST).isoformat(timespec="seconds"),
+                    exits=fx_filter.ExitSettings(selector, method), evaluate=evaluate_on))
                 flash("売買の作りの設定を保存しました。次の回から効きます")
                 st.rerun()
         if current.updated_at:
@@ -697,9 +700,8 @@ def sizing_panel(current) -> None:
                                        value=now.max_risk * 100, step=0.25, key=f"risk-{name}")
                 new[name] = fx_filter.clamp_sizing(units, risk / 100, now)
             if st.form_submit_button("数量の上限を保存", type="primary"):
-                rt.save_settings(fx_filter.FxSettings(current.deciders, current.filter,
-                                                      dt.datetime.now(JST).isoformat(timespec="seconds"),
-                                                      current.exits, new))
+                rt.save_settings(replace(current, updated_at=dt.datetime.now(JST).isoformat(timespec="seconds"),
+                                         sizing=new))
                 flash("数量の上限を保存しました。次の回から効きます")
                 st.rerun()
         proposals, answers = rt.read_jsonl(rt.SIZING_PROPOSALS), rt.read_jsonl(rt.SIZING_ANSWERS)
@@ -850,9 +852,26 @@ def watcher_pill() -> str:
     return pill(f"見張り: 動いている（{last[11:16]}）", "ok") if age < 300 else pill(f"見張り: 止まっている（{last[5:16].replace('T', ' ')}）", "bad")
 
 
+def releases() -> list[dict]:
+    from jqbt.interfaces import fx_runtime as rt
+
+    return rt.read_jsonl(ROOT / "state" / "releases.jsonl")
+
+
+def release_pill() -> str:
+    """本番で動いている版（見張り役）と、その版の反映が確認できたか。"""
+    running = watcher_state().get("version") or os.environ.get("JQBT_VERSION", "")
+    record = next((r for r in reversed(releases()) if r.get("version") == running), None)
+    if not running:
+        return pill("本番の版: 不明", "warn")
+    if record and record.get("result") == "ok":
+        return pill(f"本番の版: {running}（{str(record['verified_at'])[5:16].replace('T', ' ')} 確認済み）", "ok")
+    return pill(f"本番の版: {running}（反映の確認が無い）", "warn")
+
+
 def auto_trading_pills() -> str:
     enabled = os.environ.get("FX_LIVE_ENABLED", "").lower() == "true"
-    return " ".join([watcher_pill(),
+    return " ".join([release_pill(), watcher_pill(),
         pill("自動売買: ON", "ok") if enabled and not KILL_LIVE.exists() else pill("自動売買: 止めている", "warn"),
         pill("キルスイッチ: 入", "bad") if KILL_LIVE.exists() else pill("キルスイッチ: 切", "ok"),
         pill("ペーパー: 止めている", "warn") if PAUSE_PAPER.exists() else pill("ペーパー: 動いている", "info"),
@@ -1193,6 +1212,8 @@ def live_overview() -> None:
                 "見た数字": "" if e.get("account") == "harness" else
         ", ".join(f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")),
         "決済の手法": (e.get("decision") or {}).get("exit_method") or (e.get("logic") or {}).get("exit_method") or "",
+        "別の AI の評価": (f"{ev.get('score')}/5 {ev.get('verdict', '')}（気になる点: {ev.get('concerns', '')}）"
+                        if (ev := (e.get("logic") or {}).get("evaluation") or {}).get("score") else ev.get("error", "")),
         "見送りの確認": ((e.get("logic") or {}).get("filter") or {}).get("text")
         or ((e.get("logic") or {}).get("filter") or {}).get("error") or "",
                 "建玉": f"{held['通貨']} {held['売買']} {held['数量']:.0f}（{held['含み損益']:+,} 円）" if held else "なし",
@@ -1703,6 +1724,40 @@ def page_history() -> None:
 # ----------------------------------------------------------------------
 # システム
 # ----------------------------------------------------------------------
+def page_releases() -> None:
+    header("リリースログ", "本番で動いている版と、各版で何がどう変わったか")
+    changelog = vm.parse_changelog((ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+                                   if (ROOT / "CHANGELOG.md").exists() else "")
+    watch = watcher_state()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("見張り役（売買を動かす）の版", watch.get("version") or "—")
+    c2.metric("画面の版", os.environ.get("JQBT_VERSION", "—"))
+    c3.metric("見張り役が起動した時刻", str(watch.get("started_at") or "—")[5:16].replace("T", " "))
+    st.markdown(release_pill(), unsafe_allow_html=True)
+    rows = vm.release_rows(releases(), changelog)
+    if not rows:
+        st.info("まだ反映の記録がありません（make verify V=<版> が通ると残ります）", icon=":material/hourglass_empty:")
+    labels = {"ok": "✅ 確認できた", "fail": "❌ 失敗", "wait": "⏳ 時間切れ", "backfill": "記録を始める前の反映"}
+    for i, r in enumerate(rows):
+        live = r["version"] == watch.get("version")
+        title = (f"{'🟢 本番 ' if live else ''}{r['version']} · {r['at'][5:16].replace('T', ' ')} · "
+                 f"{labels.get(r['result'], r['result'])}" + (f" · 前の版 {r['previous']}" if r["previous"] else ""))
+        with st.expander(title, expanded=i == 0):
+            if r["note"]:
+                st.caption(r["note"])
+            if not r["changes"]:
+                st.caption("この版で新しく入った PR はありません（同じ版の反映し直し）")
+            for c in r["changes"]:
+                st.markdown(f"**#{c['pr']} {c['title']}**")
+                if c["body"]:
+                    st.markdown(c["body"])
+    with st.expander("まだ本番に入っていない変更（CHANGELOG にあって、反映の記録に無い PR）"):
+        shipped = {c["pr"] for r in rows for c in r["changes"]}
+        for n, e in sorted(changelog.items(), reverse=True):
+            if n not in shipped:
+                st.markdown(f"**#{n} {e['title']}**（{e['date']}）")
+
+
 def page_system() -> None:
     header("システム", "版・秘密情報・拡張パーツ・データの状態")
     commit, dirty = git_commit()
@@ -1767,7 +1822,8 @@ navigation = st.navigation({
             st.Page(page_signals, title="売買候補と約定", icon=":material/assignment:", url_path="signals"),
             st.Page(page_settings, title="設定", icon=":material/tune:", url_path="settings"),
             st.Page(page_history, title="履歴", icon=":material/history:", url_path="history")],
-    "システム": [st.Page(page_system, title="状態", icon=":material/info:", url_path="system")],
+    "システム": [st.Page(page_system, title="状態", icon=":material/info:", url_path="system"),
+             st.Page(page_releases, title="リリースログ", icon=":material/new_releases:", url_path="releases")],
 })
 
 with st.sidebar:

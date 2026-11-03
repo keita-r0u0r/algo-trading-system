@@ -22,7 +22,8 @@ PROVIDERS = {"jev": "Jev（TypeSafe）", "gemini": "AI（Gemini）"}
 #: 決済の手法を誰が選ぶか（建てるときに1回）
 EXIT_SELECTORS = {"fixed": "決まった手法", "ai": "AI（Gemini）が選ぶ", "jev": "Jev が選ぶ"}
 #: 画面で ON/OFF できる判断する者
-SWITCHABLE = {"ai": "AI が判断（今の作り）", "harness": "ハーネス＋決まりが判断（新しい作り）"}
+SWITCHABLE = {"ai": "AI が判断（今の作り）", "harness": "ハーネス＋決まりが判断（新しい作り）",
+              "jev": "Jev が判断（向き・リスク・決済の手法。損切り幅は機械）"}
 
 
 @dataclass(frozen=True)
@@ -51,7 +52,8 @@ class Sizing:
 
 
 #: 判断する者ごとの数量の上限の既定（ハーネス＋決まりは、比べ始めは小さく）
-DEFAULT_SIZING = {"ai": Sizing(1_000, 0.05), "carry_trend_USD_JPY": Sizing(1_000, 0.05), "harness": Sizing(300, 0.01)}
+DEFAULT_SIZING = {"ai": Sizing(1_000, 0.05), "carry_trend_USD_JPY": Sizing(1_000, 0.05), "harness": Sizing(300, 0.01),
+                  "jev": Sizing(300, 0.01)}
 
 
 def clamp_sizing(max_units: Any, max_risk: Any, default: Sizing) -> Sizing:
@@ -74,6 +76,8 @@ class FxSettings:
     updated_at: str = ""
     exits: ExitSettings = ExitSettings()
     sizing: dict[str, Sizing] = field(default_factory=lambda: dict(DEFAULT_SIZING))
+    #: Jev が建てた・閉じた判断を、別の AI（AI の設定の「F 判断の評価」のモデル）に評価させて記録に残すか
+    evaluate: bool = True
 
     def enabled(self, name: str) -> bool:
         return self.deciders.get(name, True)
@@ -83,7 +87,8 @@ class FxSettings:
 
     def to_dict(self) -> dict[str, Any]:
         return {"deciders": dict(self.deciders), "filter": asdict(self.filter), "exits": asdict(self.exits),
-                "sizing": {k: asdict(v) for k, v in self.sizing.items()}, "updated_at": self.updated_at}
+                "sizing": {k: asdict(v) for k, v in self.sizing.items()}, "evaluate": self.evaluate,
+                "updated_at": self.updated_at}
 
 
 def parse_settings(raw: dict[str, Any] | None) -> FxSettings:
@@ -104,7 +109,8 @@ def parse_settings(raw: dict[str, Any] | None) -> FxSettings:
     sizing = {name: clamp_sizing((raw_sizing.get(name) or {}).get("max_units", d.max_units),
                                  (raw_sizing.get(name) or {}).get("max_risk", d.max_risk), d)
               for name, d in DEFAULT_SIZING.items()}
-    return FxSettings(deciders, FilterSettings(mode, provider, threshold), str(raw.get("updated_at", "")), exits, sizing)
+    return FxSettings(deciders, FilterSettings(mode, provider, threshold), str(raw.get("updated_at", "")), exits, sizing,
+                      bool(raw.get("evaluate", True)))
 
 
 SKIP_QUESTION = (
