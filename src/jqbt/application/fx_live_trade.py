@@ -116,6 +116,34 @@ class Intent:
     reason: str = ""
 
 
+def exit_time_problem(exit_condition: str, hold_minutes: Any, now: dt.datetime, *, slack_minutes: int = 60) -> str:
+    """建てるときの閉じる条件に書いた時刻が、保有の目安と食い違っていれば、その理由（無ければ空）。
+
+    例: 00:34 に「24:00までに届かなければ」（もう過ぎた時刻）、保有180分なのに「22:00までに」（14時間先）。
+    時刻は、今のあとで最初に来るその時刻として読む（24:00 は翌日の 0:00）。
+    """
+    import re
+
+    try:
+        hold = float(hold_minutes or 0)
+    except (TypeError, ValueError):
+        hold = 0.0
+    if hold <= 0 or not exit_condition:
+        return ""
+    for h, m in re.findall(r"(\d{1,2})[:：](\d{2})", exit_condition):
+        hour, minute = int(h), int(m)
+        if hour > 24 or minute > 59:
+            continue
+        at = now.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(hours=hour, minutes=minute)
+        while at <= now:
+            at += dt.timedelta(days=1)
+        ahead = (at - now).total_seconds() / 60
+        if ahead > hold + slack_minutes:
+            return (f"閉じる条件の時刻（{h}:{m}）が、保有の目安（{hold:.0f}分）と合わない"
+                    f"（今から {ahead / 60:.1f}時間後）。時刻の書き違いとして建てない")
+    return ""
+
+
 def client_id(account: str, at: str, kind: str) -> str:
     """判断ごとに一意な顧客注文ID（36文字以内の英数字）。同じ判断で二度注文しないために使う。"""
     short = "".join(ch for ch in account if ch.isalnum())[:14]

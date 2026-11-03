@@ -142,7 +142,7 @@ def test_settings_round_trip(tmp_path):
 
     path = tmp_path / "fx_settings.json"
     assert rt.load_settings(path).enabled("harness")  # 無ければ既定
-    rt.save_settings(FxSettings({"ai": False, "harness": True}, FilterSettings(mode="veto", provider="gemini")), path)
+    rt.save_settings(FxSettings({"ai": "off", "harness": "live"}, FilterSettings(mode="veto", provider="gemini")), path)
     loaded = rt.load_settings(path)
     assert not loaded.enabled("ai") and loaded.filter.mode == "veto" and loaded.filter.provider == "gemini"
 
@@ -276,3 +276,20 @@ def test_jev_decides_direction_and_risk_and_another_ai_evaluates(tmp_path, monke
     assert extra["logic"]["evaluation"] == {"model": "vertex:claude", "score": 2, "verdict": "流れに逆らう"}
     d, _, extra = rt.jev_decision(empty, harness_ctx({"USD_JPY": features()}, jev=None), [])
     assert d["action"] == "hold" and "キー" in extra["error"]
+
+
+def test_shadow_book_opens_hits_stop_and_reports_results():
+    import pandas as pd
+
+    from jqbt.application import fx_shadow
+
+    now = dt.datetime(2026, 11, 4, 10, 0, tzinfo=JST)
+    opened = fx_shadow.open_event("jev", "USD_JPY", -300, 15, 30, {"bid": 158.00, "ask": 158.02}, now, {"action": "open_short"})
+    assert opened["price"] == 158.00 and opened["stop"] == 158.15 and opened["take"] == 157.70
+    [p] = fx_shadow.book([opened]).values()
+    idx = pd.date_range("2026-11-04 10:00", periods=3, freq="1min")
+    bars = pd.DataFrame({"high": [158.05, 158.10, 158.16], "low": [157.95, 157.90, 158.0]}, index=idx)
+    hit = fx_shadow.stop_or_take(p, bars)
+    assert hit["reason"] == "損切り" and hit["pips"] == -15.0 and hit["r"] == -1.0 and hit["yen"] == -45.0
+    assert fx_shadow.book([opened, hit]) == {}
+    assert fx_shadow.results([opened, hit], "jev")["total_r"] == -1.0

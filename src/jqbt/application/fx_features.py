@@ -171,7 +171,8 @@ def summarize(f: dict[str, Any]) -> list[str]:
     if "atr_pips" in h1:
         lines.append(f"ふだんの揺れ: 1時間足 {h1['atr_pips']:g} pips・5分足 {m5.get('atr_pips', 0):g} pips")
     if "rsi" in m5 or "rsi" in h1:
-        lines.append(f"RSI: 5分足 {m5.get('rsi', '—')}・1時間足 {h1.get('rsi', '—')}（70以上は買われすぎ、30以下は売られすぎの目安）")
+        lines.append(f"RSI: 5分足 {m5.get('rsi', '—')}・1時間足 {h1.get('rsi', '—')}"
+                     "（強い流れの中で70超・30割れが続くのは勢いの印。それだけでは反転の根拠にならない）")
     if "ema20_distance_pips" in h1:
         lines.append(f"1時間足の20本平均から {h1['ema20_distance_pips']:+.1f} pips（平均の向き {h1['ema20_slope_pips']:+.2f} pips/本）")
     lv = f["levels"]

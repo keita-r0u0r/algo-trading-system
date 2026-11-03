@@ -60,7 +60,7 @@ def sizing_context(events: list[dict[str, Any]], settings: fx_filter.FxSettings,
                            "（1,000通貨のドル円で約6,300円）"},
         "deciders": {name: {"current": {"max_units": settings.sizing_for(name).max_units,
                                         "max_risk": settings.sizing_for(name).max_risk},
-                            "enabled": settings.enabled(name),
+                            "stage": settings.stage(name),
                             "stats": decider_stats(events, name, equity)} for name in accounts},
     }
 

@@ -21,9 +21,17 @@ MODES = {"off": "聞かない", "shadow": "聞いて記録だけ（建てる）"
 PROVIDERS = {"jev": "Jev（TypeSafe）", "gemini": "AI（Gemini）"}
 #: 決済の手法を誰が選ぶか（建てるときに1回）
 EXIT_SELECTORS = {"fixed": "決まった手法", "ai": "AI（Gemini）が選ぶ", "jev": "Jev が選ぶ"}
-#: 画面で ON/OFF できる判断する者
-SWITCHABLE = {"ai": "AI が判断（今の作り）", "harness": "ハーネス＋決まりが判断（新しい作り）",
+#: 画面で段階を切り替えられる判断する者
+SWITCHABLE = {"ai": "AI が判断（今の作り）",
+              "carry_trend_USD_JPY": "金利差＋流れ（ドル円）", "carry_trend_EUR_JPY": "金利差＋流れ（ユーロ円）",
+              "carry_trend_GBP_JPY": "金利差＋流れ（ポンド円）", "carry_trend_AUD_JPY": "金利差＋流れ（豪ドル円）",
+              "harness": "ハーネス＋決まりが判断（新しい作り）",
               "jev": "Jev が判断（向き・リスク・決済の手法。損切り幅は機械）"}
+#: 判断する者の段階。新しい判断する者・決まりは shadow（記録だけ）から始め、画面の成績を見て live に上げる。
+#: 戻すときも反映し直さず、ここを切り替える（docs/release.md）
+STAGES = {"off": "止める（新しく建てない。持っている建玉の決済は続ける）",
+          "shadow": "記録だけ（注文は出さず、もし建てていたらの結果を残す）",
+          "live": "本番（実際に注文を出す）"}
 
 
 @dataclass(frozen=True)
@@ -72,7 +80,7 @@ def clamp_sizing(max_units: Any, max_risk: Any, default: Sizing) -> Sizing:
 
 @dataclass(frozen=True)
 class FxSettings:
-    deciders: dict[str, bool] = field(default_factory=lambda: {name: True for name in SWITCHABLE})
+    deciders: dict[str, str] = field(default_factory=lambda: {name: "live" for name in SWITCHABLE})
     filter: FilterSettings = FilterSettings()
     updated_at: str = ""
     exits: ExitSettings = ExitSettings()
@@ -80,8 +88,12 @@ class FxSettings:
     #: Jev が建てた・閉じた判断を、別の AI（AI の設定の「F 判断の評価」のモデル）に評価させて記録に残すか
     evaluate: bool = True
 
+    def stage(self, name: str) -> str:
+        return self.deciders.get(name, "live")
+
     def enabled(self, name: str) -> bool:
-        return self.deciders.get(name, True)
+        """注文を出すか、記録だけでも判断するか（止めていなければ True）。"""
+        return self.stage(name) != "off"
 
     def sizing_for(self, name: str) -> Sizing:
         return self.sizing.get(name) or DEFAULT_SIZING.get(name) or Sizing(UNITS_RANGE[1], RISK_RANGE[1])
@@ -95,7 +107,14 @@ class FxSettings:
 def parse_settings(raw: dict[str, Any] | None) -> FxSettings:
     """置いてある設定を読む。知らない値は既定に戻す（壊れた設定で売買を止めない）。"""
     raw = raw or {}
-    deciders = {name: bool((raw.get("deciders") or {}).get(name, True)) for name in SWITCHABLE}
+    def stage(value: Any) -> str:  # 前の形（True / False）も読む
+        if value is True or value is None:
+            return "live"
+        if value is False:
+            return "off"
+        return value if value in STAGES else "live"
+
+    deciders = {name: stage((raw.get("deciders") or {}).get(name)) for name in SWITCHABLE}
     f = raw.get("filter") or {}
     mode = f.get("mode") if f.get("mode") in MODES else FilterSettings.mode
     provider = f.get("provider") if f.get("provider") in PROVIDERS else FilterSettings.provider

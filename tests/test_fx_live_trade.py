@@ -204,3 +204,17 @@ def test_fatal_only_when_positions_and_margin_ratio_low():
     assert is_fatal({"equity": "10000", "marginRatio": "790"}, has_positions=True, config=ON) == ""
     assert "証拠金維持率" in is_fatal({"equity": "1500", "marginRatio": "105"}, has_positions=True, config=ON)
     assert "0以下" in is_fatal({"equity": "-50", "marginRatio": "0"}, has_positions=True, config=ON)
+
+
+def test_exit_time_that_contradicts_the_holding_time_is_caught():
+    import datetime as dt
+
+    from jqbt.application.fx_live_trade import exit_time_problem
+
+    jst = dt.timezone(dt.timedelta(hours=9))
+    at = lambda h, m: dt.datetime(2026, 11, 4, h, m, tzinfo=jst)  # noqa: E731
+    assert "合わない" in exit_time_problem("ニューヨーク市場の終盤（24:00 JST）までに212.2に到達しなかった場合", 120, at(0, 34))
+    assert "合わない" in exit_time_problem("22:00までに212.500に到達しなかった場合", 180, at(7, 55))
+    assert exit_time_problem("10:30までに158.1に届かなければ", 180, at(8, 0)) == ""
+    assert exit_time_problem("1時間足の終値が 157.80 を下回ったら", 60, at(8, 0)) == ""
+    assert exit_time_problem("22:00までに", 0, at(8, 0)) == ""
