@@ -117,13 +117,16 @@ async def watch(dry_run: bool) -> None:
     cloud = None if dry_run else Cloud(rt.STATE)
     history = PriceHistory(dt.timedelta(minutes=CONFIG.window_minutes))
     state = {"started_at": dt.datetime.now(JST).isoformat(timespec="seconds"), "last_tick": None,
-             "trading": trades, "last_cycle": None, "last_ok_cycle": None, "cycles": 0, "reconnects": 0, "wakes": []}
+             "trading": trades, "version": os.environ.get("JQBT_VERSION", ""),
+             "last_cycle": None, "last_ok_cycle": None, "cycles": 0, "reconnects": 0, "wakes": []}
     positions: list[dict] = []
     last_wake: dt.datetime | None = None
     fired: set[str] = set()
     last_beat = last_check = last_positions = 0.0
     next_periodic = time.monotonic()
     busy = False
+    if cloud:  # 起動したらすぐ「これから担当する」印を書く（ジョブは起動5分以内の見張り役に売買を譲る）
+        await asyncio.to_thread(cloud.write_json, "state/fx_watch.json", state)
 
     async def cycle(reason: str) -> None:
         nonlocal busy
@@ -145,6 +148,8 @@ async def watch(dry_run: bool) -> None:
             state["wakes"] = (state["wakes"] + [{"at": now.isoformat(timespec="seconds"), "reason": reason,
                                                  "result": f"{result}（{time.monotonic() - started:.0f}秒）"}])[-30:]
         print(f"{now:%H:%M:%S} {'随時' if reason else '定期'}判断 {reason} → {result}", flush=True)
+        if cloud:  # 回が終わったら、すぐ生きている印を書く（ジョブが古い印を見て、二重に売買しないように）
+            await asyncio.to_thread(cloud.write_json, "state/fx_watch.json", state)
 
     while True:
         try:

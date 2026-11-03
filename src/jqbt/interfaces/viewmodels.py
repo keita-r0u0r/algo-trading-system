@@ -173,50 +173,8 @@ def account_kind(name: str) -> str:
     return "基準" if name in ("buy_and_hold", "no_trade") else "機械"
 
 
-#: 判断する者が「ちゃんと動いているか」の目安。AI は15分ごと（見張り役が起こした回は必ず）に呼ぶので、20分を超えて
-#: 実際に呼べていなければおかしい。判断の回そのものは5分ごとなので、15分を超えて無ければ止まっている
-AI_STALE_MINUTES = 20
-DECISION_STALE_MINUTES = 15
-
-
-def decider_health(events: Sequence[dict[str, Any]], name: str, now: dt.datetime, *,
-                   market_open: bool = True) -> dict[str, Any]:
-    """判断する者 ``name`` の動き具合（実際の口座の判断の記録 live_decision から）。
-
-    AI の「持ち続ける」が、AI が実際に考えた結果か、呼べなかった・呼ぶ回ではなかったときの既定の答えかを分ける。
-    返すのは 状態（ok / warn / bad）・その説明・最後に実際に判断した時刻・直近1時間の内訳・最後の失敗。
-    """
-    mine = [e for e in events if e.get("kind") == "live_decision" and e.get("account") == name]
-    hour_ago = now - dt.timedelta(hours=1)
-
-    def at(e: dict[str, Any]) -> dt.datetime | None:
-        try:
-            return dt.datetime.fromisoformat(str(e.get("at")))
-        except ValueError:
-            return None
-
-    recent = [e for e in mine if (t := at(e)) and t >= hour_ago]
-    is_ai = name == "ai"
-    real = [e for e in mine if (e.get("model") if is_ai else e.get("logic"))]
-    failed = [e for e in mine if e.get("error")]
-    last = at(mine[-1]) if mine else None
-    last_real = at(real[-1]) if real else None
-    result = {
-        "last": last, "last_real": last_real,
-        "real_1h": sum(1 for e in recent if e in real), "failed_1h": sum(1 for e in recent if e.get("error")),
-        "rounds_1h": len(recent), "last_error": failed[-1].get("error") if failed else "",
-    }
-    if not market_open:
-        return {**result, "state": "info", "text": "市場が閉まっている"}
-    if last is None or now - last > dt.timedelta(minutes=DECISION_STALE_MINUTES):
-        return {**result, "state": "bad", "text": "判断の回が止まっている"}
-    if last_real is None or now - last_real > dt.timedelta(minutes=AI_STALE_MINUTES if is_ai else DECISION_STALE_MINUTES):
-        what = "AI を呼べていない" if is_ai else "ロジックが判断できていない"
-        reason = f"（{result['last_error'][:80]}）" if result["last_error"] else ""
-        return {**result, "state": "bad", "text": what + reason}
-    if result["failed_1h"]:
-        return {**result, "state": "warn", "text": f"直近1時間に{result['failed_1h']}回失敗"}
-    return {**result, "state": "ok", "text": "動いている"}
+# 判断する者の動き具合は、健康診断の部品（application/fx_health.py）にある
+from ..application.fx_health import decider_health  # noqa: E402,F401
 
 
 # --- 判断を人が読める文にする ---------------------------------------------------------

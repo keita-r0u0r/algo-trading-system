@@ -755,10 +755,35 @@ def page_overview() -> None:
     live(live_overview if venue() == "live" else home_body)()
 
 
+def health_findings(events: list[dict] | None = None) -> list:
+    """健康診断（application/fx_health.py）。画面の上と、反映後の確認が同じものを使う。"""
+    from jqbt.application.fx_health import check_all
+
+    return check_all(dt.datetime.now(JST), watch=watcher_state(), live_events=live_log() if events is None else events,
+                     accounts=LiveConfig().accounts,
+                     live_enabled=os.environ.get("FX_LIVE_ENABLED", "").lower() == "true",
+                     killed=KILL_LIVE.exists(), paper_paused=PAUSE_PAPER.exists())
+
+
+def health_panel(events: list[dict]) -> None:
+    """動いているはずのものが、本当に動いているか。異常があれば、いちばん上に出す。"""
+    from jqbt.application.fx_health import worst
+
+    findings = health_findings(events)
+    icon = {"ok": "🟢", "info": "⚪", "warn": "🟡", "bad": "🔴"}
+    bad = [f for f in findings if f.state in ("bad", "warn")]
+    label = {"ok": "すべて正常に動いています", "info": "正常に動いています（お知らせあり）",
+             "warn": f"注意: {len(bad)}件", "bad": f"異常: {len(bad)}件"}[worst(findings)]
+    with st.expander(f"{icon[worst(findings)]} 健康診断 — {label}", expanded=bool(bad)):
+        for f in findings:
+            st.markdown(f"{icon.get(f.state, '⚪')} **{vm.account_label(f.name)}** — {f.text}")
+
+
 def live_overview() -> None:
     prices = quotes()
     price_strip(prices)
     events = live_log()
+    health_panel(events)
     snapshots = [e for e in events if e.get("kind") == "snapshot" and live_assets(e)]
     if not snapshots:
         st.info("まだ口座を読んだ記録がありません（15分ごとに読みます）", icon=":material/hourglass_empty:")
@@ -1312,6 +1337,20 @@ navigation = st.navigation({
 
 with st.sidebar:
     st.segmented_control("口座", list(VENUES), key="venue", default="実運用", width="stretch")
+    try:
+        from jqbt.application.fx_health import worst as _worst
+
+        _findings = health_findings()
+        _state = _worst(_findings)
+        _bad = [f for f in _findings if f.state in ("bad", "warn")]
+        if _state == "bad":
+            st.error("異常あり: " + "、".join(f"{vm.account_label(f.name)}（{f.text[:20]}）" for f in _bad[:3]))
+        elif _state == "warn":
+            st.warning("注意: " + "、".join(f"{vm.account_label(f.name)}（{f.text[:20]}）" for f in _bad[:3]))
+        else:
+            st.success("健康診断: 正常")
+    except Exception as exc:  # 診断そのものが壊れても、画面は出す（壊れたことは見せる）
+        st.error(f"健康診断を実行できない: {type(exc).__name__}")
     st.segmented_control("画面の自動更新", list(REFRESH_CHOICES), key="refresh", default="30秒")
     if st.button("今すぐ更新", icon=":material/refresh:", width="stretch"):
         quotes.clear()

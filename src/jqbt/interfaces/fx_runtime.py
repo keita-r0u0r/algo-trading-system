@@ -460,13 +460,25 @@ WATCH_FRESH_SECONDS = 5 * 60
 
 
 def watcher_trades() -> bool:
-    """見張り役が実際の売買を担当していて、実際の口座に届いているか（IP の制限で弾かれていたらジョブが代わる）。"""
+    """見張り役が実際の売買を担当していて、実際の口座に届いているか（IP の制限で弾かれていたらジョブが代わる）。
+
+    起動したばかり（WATCH_FRESH_SECONDS 以内）の見張り役も、最初の回を終えるまでは担当とみなす
+    （その隙間にジョブも売買して、同じ口座で二重に建てないように）。
+    """
     try:
         state = json.loads(WATCH_STATE.read_text(encoding="utf-8"))
-        last = dt.datetime.fromisoformat(state.get("last_ok_cycle") or "")
     except (OSError, ValueError):
         return False
-    return bool(state.get("trading")) and (dt.datetime.now(JST) - last).total_seconds() < WATCH_FRESH_SECONDS
+    if not state.get("trading"):
+        return False
+    now = dt.datetime.now(JST)
+    for key in ("last_ok_cycle", "started_at"):
+        try:
+            if (now - dt.datetime.fromisoformat(state.get(key) or "")).total_seconds() < WATCH_FRESH_SECONDS:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def ai_due(trigger: str) -> bool:

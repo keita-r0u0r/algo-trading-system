@@ -1,7 +1,7 @@
 # 仮想環境（.venv）があればその Python を使う
 PY := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
-.PHONY: install test fetch compare run holdout walkforward gui docker-build docker-test docker-gui infra-init infra-plan infra-apply image deploy cloud-seed paper
+.PHONY: install test fetch compare run holdout walkforward gui docker-build docker-test docker-gui infra-init infra-plan infra-apply image deploy cloud-seed paper verify health
 
 install:
 	$(PY) -m pip install -e ".[dev]"
@@ -83,6 +83,14 @@ image:
 		--service-account=$$($(TOFU) output -raw builder_service_account) \
 		--gcs-source-staging-dir=gs://$$($(TOFU) output -raw build_source_bucket)/source \
 		--substitutions=_IMAGE=$$($(TOFU) output -raw image),_TAG=$$(git rev-parse --short HEAD),_VERSION="$(VERSION)"
+
+# 反映したあとの確認（新しい版の見張り役が、AI・ロジックで判断して実際の口座に届くまで待つ）。V= で版を指定
+verify:
+	$(PY) scripts/fx_verify.py --version $${V:-$$(git rev-parse --short HEAD)}
+
+# 今の健康診断だけ
+health:
+	$(PY) scripts/fx_verify.py
 
 # イメージを作って、その版で Cloud Run を更新する
 deploy: image
