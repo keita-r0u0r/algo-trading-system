@@ -554,10 +554,6 @@ resource "google_compute_subnetwork" "watch" {
 }
 
 # イメージの版が変わったら、仮想マシンを作り直して新しい版で動かす
-resource "terraform_data" "watcher_image" {
-  input = var.image_tag
-}
-
 resource "google_compute_instance" "watcher" {
   count        = var.fx_watch_enabled && var.image_tag != "" ? 1 : 0
   name         = "${local.name}-watcher"
@@ -584,8 +580,25 @@ resource "google_compute_instance" "watcher" {
     scopes = ["cloud-platform"]
   }
 
+  # 反映のたびに仮想マシンを作り直すと、起動とイメージの取り込みで数分止まる。そこで、版（image）と環境変数（watch-env）を
+  # メタデータに置き、仮想マシンの中の見張り（fx-watch-update、30秒ごと）が変化に気づいたら、新しいイメージを先に取ってから
+  # コンテナだけを入れ替える（止まるのは十数秒）。メタデータの変更は、仮想マシンを止めずにその場で反映される。
+  # user-data（起動の手順）を変えたときだけは、反映で -replace=google_compute_instance.watcher[0] を付けて作り直す
   metadata = {
     google-logging-enabled = "true"
+    image                  = "${local.image}:${var.image_tag}"
+    watch-env              = <<-EOT
+      GCP_PROJECT=${var.project}
+      STATE_BUCKET=${google_storage_bucket.state.name}
+      FX_JOB_NAME=${local.name}-fx-paper
+      FX_JOB_REGION=${var.region}
+      FX_WATCH_TRADES=true
+      FX_LIVE_ENABLED=${var.fx_live_enabled}
+      JQBT_EXTENSIONS=ai
+      AI_VERTEX_REGION=global
+      AI_MONTHLY_BUDGET_USD=${var.ai_monthly_budget_usd}
+      JQBT_VERSION=${var.app_version}
+    EOT
     user-data              = <<-EOT
       #cloud-config
       write_files:
@@ -600,27 +613,41 @@ resource "google_compute_instance" "watcher" {
           Environment="HOME=/home/watcher"
           ExecStartPre=/bin/mkdir -p /home/watcher
           ExecStartPre=/usr/bin/docker-credential-gcr configure-docker --registries ${var.region}-docker.pkg.dev
-          ExecStart=/usr/bin/docker run --rm --name=fx-watch --log-driver=gcplogs \
-            -e GCP_PROJECT=${var.project} -e STATE_BUCKET=${google_storage_bucket.state.name} \
-            -e FX_JOB_NAME=${local.name}-fx-paper -e FX_JOB_REGION=${var.region} \
-            -e FX_WATCH_TRADES=true -e FX_LIVE_ENABLED=${var.fx_live_enabled} -e JQBT_EXTENSIONS=ai \
-            -e AI_VERTEX_REGION=global -e AI_MONTHLY_BUDGET_USD=${var.ai_monthly_budget_usd} -e JQBT_VERSION=${var.app_version} \
-            ${local.image}:${var.image_tag} python scripts/fx_watch.py
+          ExecStartPre=/bin/bash -c 'M=http://metadata.google.internal/computeMetadata/v1/instance/attributes; IMG=$$(curl -sf -H "Metadata-Flavor: Google" $$M/image) && ENV=$$(curl -sf -H "Metadata-Flavor: Google" $$M/watch-env) && printf "%%s\\n" "$$ENV" > /home/watcher/env && printf "%%s" "$$IMG" > /home/watcher/image && printf "%%s\\n%%s" "$$IMG" "$$ENV" > /home/watcher/applied'
+          ExecStart=/bin/bash -c 'exec /usr/bin/docker run --rm --name=fx-watch --log-driver=gcplogs --env-file /home/watcher/env $$(cat /home/watcher/image) python scripts/fx_watch.py'
           ExecStop=/usr/bin/docker stop fx-watch
           Restart=always
           RestartSec=15
           [Install]
           WantedBy=multi-user.target
+      - path: /etc/systemd/system/fx-watch-update.service
+        permissions: "0644"
+        content: |
+          [Unit]
+          Description=Swap the FX watcher container when the image or env in metadata changes
+          [Service]
+          Type=oneshot
+          Environment="HOME=/home/watcher"
+          ExecStart=/bin/bash -c 'M=http://metadata.google.internal/computeMetadata/v1/instance/attributes; IMG=$$(curl -sf -H "Metadata-Flavor: Google" $$M/image) || exit 0; ENV=$$(curl -sf -H "Metadata-Flavor: Google" $$M/watch-env) || exit 0; [ "$$(printf "%%s\\n%%s" "$$IMG" "$$ENV")" ="$$(cat /home/watcher/applied 2>/dev/null)" ] && exit 0; /usr/bin/docker-credential-gcr configure-docker --registries ${var.region}-docker.pkg.dev && /usr/bin/docker pull "$$IMG" && systemctl restart fx-watch.service'
+      - path: /etc/systemd/system/fx-watch-update.timer
+        permissions: "0644"
+        content: |
+          [Unit]
+          Description=Check the FX watcher image every 30 seconds
+          [Timer]
+          OnBootSec=60
+          OnUnitActiveSec=30
+          AccuracySec=5
+          [Install]
+          WantedBy=timers.target
       runcmd:
       - systemctl daemon-reload
       - systemctl enable --now fx-watch.service
+      - systemctl enable --now fx-watch-update.timer
     EOT
   }
 
   allow_stopping_for_update = true
-  lifecycle {
-    replace_triggered_by = [terraform_data.watcher_image]
-  }
   depends_on = [
     google_storage_bucket_iam_member.watcher_state,
     google_artifact_registry_repository_iam_member.watcher_pull,
