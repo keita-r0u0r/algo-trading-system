@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import html
 import json
 import os
 import subprocess
@@ -76,6 +77,22 @@ st.markdown(
       .pill {display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .75rem; font-weight: 600;}
       .pill.ok {background: #dcfce7; color: #166534;} .pill.warn {background: #fef3c7; color: #92400e;}
       .pill.bad {background: #fee2e2; color: #991b1b;} .pill.info {background: #e0e7ff; color: #3730a3;}
+      .pill {margin: 2px 2px 2px 0; white-space: nowrap;}
+      /* 数字のカードの見出し・差分は、切らずに折り返す（スマホで全文を読めるように） */
+      [data-testid="stMetricLabel"] p, [data-testid="stMetricLabel"] div {white-space: normal !important;
+          overflow: visible !important; text-overflow: clip !important;}
+      [data-testid="stMetricDelta"] div {white-space: normal !important;}
+      .price-strip {display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: .2rem;}
+      .price-chip {background: var(--secondary-background-color); border: 1px solid rgba(15,23,42,.08);
+                   border-radius: 10px; padding: 6px 10px; font-variant-numeric: tabular-nums; font-size: .95rem;}
+      .muted {color: #64748b; font-size: .85rem;}
+      @media (max-width: 640px) {
+        .block-container {padding: 1.2rem .8rem 2.5rem .8rem !important;}
+        h1 {font-size: 1.3rem !important;}
+        [data-testid="stMetric"] {padding: 10px 12px;}
+        [data-testid="stMetricValue"] {font-size: 1.15rem;}
+        .page-subtitle {font-size: .85rem;}
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -246,14 +263,15 @@ def price_strip(prices: dict[str, dict[str, float]]) -> None:
     if not prices:
         st.caption("今の値段を取れませんでした（記録の値で表示しています）")
         return
-    columns = st.columns(len(prices))
-    for column, (symbol, q) in zip(columns, prices.items()):
-        mid = (q["bid"] + q["ask"]) / 2
-        column.metric(vm.PAIR_LABELS.get(symbol, symbol), f"{mid:,.3f}",
-                      f"スプレッド {(q['ask'] - q['bid']) / 0.01:.1f} pips", delta_color="off", delta_arrow="off")
+    # 数字のカードを4つ並べると、スマホでは縦に積まれて画面を占めるので、折り返す小さな札にする
+    chips = "".join(
+        f"<div class='price-chip'><span class='muted'>{vm.PAIR_LABELS.get(symbol, symbol)}</span> "
+        f"<b>{(q['bid'] + q['ask']) / 2:,.3f}</b> <span class='muted'>±{(q['ask'] - q['bid']) / 0.01:.1f}</span></div>"
+        for symbol, q in prices.items())
+    st.markdown(f"<div class='price-strip'>{chips}</div>", unsafe_allow_html=True)
     every = refresh_seconds()
-    st.caption(f"{dt.datetime.now(JST):%H:%M:%S} 時点の値段" + (f"・{every}秒ごとに更新" if every else "・自動更新は止めています")
-               + "。評価額と含み損益は、今の値段で評価し直しています（売買の判断と記録は15分ごと）")
+    st.caption(f"{dt.datetime.now(JST):%H:%M:%S} 時点の値段（± はスプレッド pips）" +
+               (f"・{every}秒ごとに更新" if every else "・自動更新は止めています"))
 
 
 def marked_equity(state: dict, prices: dict[str, dict[str, float]]) -> float:
@@ -361,7 +379,7 @@ def home_body() -> None:
                                                  if k not in ("rule", "version"))
             st.markdown(f"{who} {ok} `{e['at'][5:16].replace('T', ' ')}` **{vm.account_label(e['account'])}** — "
                         f"{d.get('action')} {d.get('symbol', '')}  \n<span style='color:#64748b;font-size:.85rem'>"
-                        f"{(why or '')[:160]}</span>", unsafe_allow_html=True)
+                        f"{why or ''}</span>", unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------
@@ -495,7 +513,7 @@ def fx_paper_body() -> None:
             "通貨": e.get("symbol", ""), "数量": e.get("units"),
             "値段": round(e.get("price", e.get("exit_price", 0)) or 0, 3),
             "損益": round(e["pnl"]) if "pnl" in e else None,
-            "理由": str(e.get("reason", ""))[:120],
+            "理由": str(e.get("reason", "")),
         } for e in reversed(fills)][:200]), hide_index=True, width="stretch")
     st.caption("判断のあとの値動きと根拠の照らし合わせは scripts/fx_paper_review.py。値動きは結果論なので、傾向を見る")
 
@@ -775,7 +793,8 @@ KILL_LIVE = ROOT / "state" / "KILL_fx_live"
 
 
 def venue() -> str:
-    return VENUES.get(st.session_state.get("venue", "実運用"), "live")
+    """ふだんの画面は実運用だけ。ペーパーは「ペーパー」の画面にまとめた。"""
+    return "live"
 
 
 def venue_header(title: str, live_text: str, paper_text: str) -> None:
@@ -1111,14 +1130,14 @@ def kpi_strip(events: list[dict], prices: dict) -> None:
     budget = float(os.environ.get("AI_MONTHLY_BUDGET_USD", "5") or 5)
     c = st.columns(5)
     if o:
-        c[0].metric("今の資産", f"{o['current']:,.0f} 円", f"月初から {o['current'] / o['start'] - 1:+.1%}")
+        # 差分の文は符号で始める（Streamlit は先頭の符号で上がり・下がりの色と矢印を決める）
+        c[0].metric("今の資産", f"{o['current']:,.0f} 円", f"{o['current'] / o['start'] - 1:+.1%}（月初から）")
         c[1].metric(f"今月の目標（{o['goal'] / o['start']:.1f}倍）", f"{o['goal']:,.0f} 円",
                     f"あと {o['goal'] - o['current']:,.0f} 円・1日 {o['required_daily']:+.1%} 必要" if o.get("required_daily") is not None else "",
                     delta_color="off", delta_arrow="off")
         if o.get("projected"):
             c[2].metric("月末の見込み（今のペース）", f"{o['projected']:,.0f} 円",
-                        f"目標まで {o['projected'] - o['goal']:+,.0f} 円",
-                        delta_color="normal" if o["projected"] >= o["goal"] else "inverse",
+                        f"{o['projected'] - o['goal']:+,.0f} 円（目標との差）",
                         help=f"月初から {o['elapsed_days']:.1f} 平日で1日 {o['daily_pace']:+.2%}。残り {o['remaining_days']:.1f} 平日も同じペースなら")
         else:
             c[2].metric("月末の見込み（今のペース）", "—", "まだ半日分もない", delta_color="off", delta_arrow="off")
@@ -1250,7 +1269,7 @@ def live_overview() -> None:
                 d = e.get("decision") or {}
                 detail = f"{d.get('action')} {d.get('symbol', '')} → {'通過' if e.get('approved') else e.get('rejected')}"
             st.markdown(f"{pill(text, kind)} `{e['at'][5:16].replace('T', ' ')}` **{vm.account_label(e.get('account', ''))}** "
-                        f"<span style='color:#64748b;font-size:.85rem'>{detail[:140]}</span>", unsafe_allow_html=True)
+                        f"<span style='color:#64748b;font-size:.85rem'>{detail}</span>", unsafe_allow_html=True)
 
 
 def page_scalp() -> None:
@@ -1335,7 +1354,7 @@ def paper_trades() -> None:
         "時刻": e.get("at", "")[5:16].replace("T", " "), "判断する者": vm.account_label(e.get("account", "")),
         "種類": "建てた" if e["kind"] == "open" else "閉じた", "通貨": vm.PAIR_LABELS.get(e.get("symbol"), e.get("symbol")),
         "数量": e.get("units"), "値段": round(e.get("price", e.get("exit_price", 0)) or 0, 3),
-        "損益": round(e["pnl"]) if "pnl" in e else None, "理由": str(e.get("reason", ""))[:100],
+        "損益": round(e["pnl"]) if "pnl" in e else None, "理由": str(e.get("reason", "")),
     } for e in reversed(fills)][:300]), hide_index=True, width="stretch")
 
 
@@ -1394,12 +1413,16 @@ def live_decisions() -> None:
         "気にしていること": (e.get("decision") or {}).get("risks", "") or "",
         "起こした理由": e.get("trigger", "") or "",
     } for e, h in reversed(rows)][:300])
+    view = st.segmented_control("見せ方", ["カード（全文）", "表"], default="カード（全文）", key="decisions-view",
+                                label_visibility="collapsed")
     if table.empty:
         st.caption("該当する判断はありません")
-    else:
+    elif view == "表":
         # 全部の行で空の列は出さない
         table = table.loc[:, [c for c in table.columns if table[c].astype(str).str.len().gt(0).any()]]
         st.dataframe(table, hide_index=True, width="stretch")
+    else:
+        decision_cards(table.to_dict("records"))
     with st.expander("ロジックの決まり（機械の判断）"):
         from jqbt.interfaces.fx_runtime import RULES, RULES_VERSION
 
@@ -1412,8 +1435,54 @@ def live_decisions() -> None:
             st.markdown(f"- **{vm.account_label(key) if key != 'carry_trend' else '金利差＋流れ'}**: {text}")
 
 
+#: カードの見出しに出す列と、本文に全文で出す列（それ以外は「そのほか」にたたむ）
+CARD_HEAD = ("時刻", "判断する者", "判断", "通ったか", "出どころ")
+CARD_BODY = ("理由", "この先の見込み", "予想", "閉じる条件", "決済の手法", "見送りの確認", "別の AI の評価")
+
+
+def decision_cards(rows: list[dict], limit: int = 60) -> None:
+    """判断を1件ずつカードで出す。表のように文が切れないので、スマホでも全文が読める。"""
+    for r in rows[:limit]:
+        with st.container(border=True):
+            passed = r.get("通ったか", "")
+            mark = pill("通らなかった", "bad") if passed.startswith("通らなかった") else (pill("通った", "ok") if passed else "")
+            st.markdown(f"{mark} **{r.get('時刻', '')} · {r.get('判断する者', '')} · {r.get('判断', '')}**"
+                        f" <span class='muted'>{r.get('出どころ', '')}</span>", unsafe_allow_html=True)
+            if passed.startswith("通らなかった"):
+                st.markdown(f"<span class='muted'>{html.escape(passed)}</span>", unsafe_allow_html=True)
+            for key in CARD_BODY:
+                value = str(r.get(key) or "").strip()
+                if value:
+                    text = html.escape(value)
+                    st.markdown(text if key == "理由" else f"<span class='muted'>{key}:</span> {text}",
+                                unsafe_allow_html=True)
+            rest = {k: v for k, v in r.items() if k not in CARD_HEAD + CARD_BODY and str(v or "").strip()}
+            if rest:
+                with st.expander("そのほか"):
+                    for k, v in rest.items():
+                        st.markdown(f"<span class='muted'>{k}:</span> {html.escape(str(v))}", unsafe_allow_html=True)
+    if len(rows) > limit:
+        st.caption(f"新しい {limit} 件だけ出しています（全部は「表」で見られる）")
+
+
 def paper_decisions() -> None:
     fx_paper_body()
+
+
+def page_paper_home() -> None:
+    header("ペーパーの概要", "ペーパー運用（シミュレーション）の口座。実際のお金は動きません")
+    st.markdown(pill("ペーパー（シミュレーション）", "info"), unsafe_allow_html=True)
+    live(home_body)()
+
+
+def page_paper_trades() -> None:
+    header("ペーパーの取引", "ペーパー運用の仮想の約定")
+    live(paper_trades)()
+
+
+def page_stocks_soon() -> None:
+    header("国内株", "準備中")
+    st.info("国内株の売買は、今は動かしていません。準備ができたら、ここから使えるようにします。", icon=":material/construction:")
 
 
 def page_compare() -> None:
@@ -1838,22 +1907,20 @@ navigation = st.navigation({
     "取引": [st.Page(page_trades, title="取引履歴", icon=":material/receipt_long:", url_path="trades"),
            st.Page(page_decisions, title="判断の記録", icon=":material/psychology:", url_path="decisions"),
            st.Page(page_compare, title="判断する者の比較", icon=":material/compare_arrows:", url_path="compare"),
-           st.Page(page_scalp, title="短期売買（ペーパー）", icon=":material/bolt:", url_path="scalp"),
-           st.Page(page_controls, title="操作", icon=":material/toggle_on:", url_path="controls")],
-    "詳細": [st.Page(page_fx_live, title="口座の詳細（実運用）", icon=":material/account_balance_wallet:", url_path="fx-live"),
-           st.Page(page_fx_paper, title="口座の詳細（ペーパー）", icon=":material/show_chart:", url_path="fx-paper"),
-           st.Page(page_fx_lab, title="検証（ダミー）", icon=":material/science:", url_path="fx-lab")],
+           st.Page(page_controls, title="操作", icon=":material/toggle_on:", url_path="controls"),
+           st.Page(page_fx_live, title="口座の詳細", icon=":material/account_balance_wallet:", url_path="fx-live")],
     **({"AI": ext_pages} if ext_pages else {}),
-    "国内株": [st.Page(page_today, title="今日", icon=":material/today:", url_path="stocks"),
-            st.Page(page_signals, title="売買候補と約定", icon=":material/assignment:", url_path="signals"),
-            st.Page(page_settings, title="設定", icon=":material/tune:", url_path="settings"),
-            st.Page(page_history, title="履歴", icon=":material/history:", url_path="history")],
+    "ペーパー": [st.Page(page_paper_home, title="概要（P）", icon=":material/science:", url_path="paper"),
+             st.Page(page_paper_trades, title="取引（P）", icon=":material/receipt:", url_path="paper-trades"),
+             st.Page(page_fx_paper, title="口座と判断（P）", icon=":material/show_chart:", url_path="fx-paper"),
+             st.Page(page_scalp, title="短期売買（P）", icon=":material/bolt:", url_path="scalp"),
+             st.Page(page_fx_lab, title="検証（ダミー）", icon=":material/biotech:", url_path="fx-lab")],
     "システム": [st.Page(page_system, title="状態", icon=":material/info:", url_path="system"),
-             st.Page(page_releases, title="リリースログ", icon=":material/new_releases:", url_path="releases")],
+             st.Page(page_releases, title="リリースログ", icon=":material/new_releases:", url_path="releases"),
+             st.Page(page_stocks_soon, title="国内株（準備中）", icon=":material/construction:", url_path="stocks")],
 })
 
 with st.sidebar:
-    st.segmented_control("口座", list(VENUES), key="venue", default="実運用", width="stretch")
     try:
         from jqbt.application.fx_health import worst as _worst
 
@@ -1874,9 +1941,6 @@ with st.sidebar:
     if st.button("今すぐ更新", icon=":material/refresh:", width="stretch"):
         quotes.clear()
         st.rerun()
-    with st.expander("国内株の設定"):
-        st.selectbox("国内株の台帳", ["paper", "live"], key="profile",
-                     format_func=lambda p: "ペーパー（仮想の約定）" if p == "paper" else "実運用（実際の約定を記録）")
     st.caption(DISCLAIMER)
 
 navigation.run()
