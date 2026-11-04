@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 import pandas as pd
 
-from ..application import fx_calendar, fx_exits, fx_features, fx_filter, fx_jev, fx_setups, fx_shadow, fx_sizing
+from ..application import fx_calendar, fx_exits, fx_features, fx_filter, fx_jev, fx_setups, fx_shadow, fx_sizing, fx_spread
 from ..application.fx_live_trade import Intent, LiveConfig, book_from_events, exit_time_problem
 from ..application.fx_paper import (
     PaperAccount,
@@ -368,6 +368,8 @@ def decide(name: str, account: PaperAccount, ctx: Context, events: list[dict], *
             sizing = ctx.settings.sizing_for("ai")
             context["frame"]["max_units"] = sizing.max_units
             context["frame"]["max_risk_per_trade"] = min(context["frame"].get("max_risk_per_trade", 1), sizing.max_risk)
+            context["frame"]["max_entry_spread_pips"] = ("建てるときのスプレッドは、1 pip か損切り幅（stop_pips）の10%の"
+                                                         "大きいほうまで。超えると機械が通さない")
             context["goal"] = ("実際の口座。利用者の目標は1か月で資金1.5倍。数量は risk_fraction（枠の上限まで）で決まる。"
                                "根拠が強いときは大きく、弱いときは小さく、無いときは hold。枠と損切りは必ず守る")
         context["market"]["economic_calendar"] = {
@@ -464,7 +466,8 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
         return None
     frame = TradingFrame(symbols=SYMBOLS, risk=RISK_PROFILES[risk])
     carry_frame = TradingFrame(symbols=SYMBOLS, risk=RISK_PROFILES["max"])
-    live_frame = TradingFrame(symbols=SYMBOLS, risk=RISK_PROFILES["live"])
+    # 実際の口座のスプレッドは、建てるたびに fx_spread で判断する（枠の一律の幅は、その外側の安全網）
+    live_frame = TradingFrame(symbols=SYMBOLS, risk=RISK_PROFILES["live"], max_entry_spread_pips=SPREAD_HARD_CAP)
     insts = instruments(api)
     quotes = {}
     for t in api.ticker():
@@ -1020,6 +1023,11 @@ def trade_live(ctx: "Context") -> bool:
                 problem = exit_time_problem(str(decision.get("exit_condition") or ""), decision.get("hold_minutes"), ctx.now)
                 if problem:
                     approved, rejected = None, problem
+            verdict = spread_check(decision, ctx)
+            if verdict is not None:
+                extra = {**extra, "note": ((extra.get("note") or "") + " " + verdict.text).strip()}
+                if approved is not None and not verdict.ok:
+                    approved, rejected = None, verdict.text
             session.events.append({"kind": "live_decision", "at": ctx.now.isoformat(), "account": name,
                                    "decision": {k: v for k, v in decision.items() if k != "context"},
                                    "approved": approved is not None, "rejected": rejected,
@@ -1038,6 +1046,22 @@ def trade_live(ctx: "Context") -> bool:
 
 
 SHADOW_LOG = STATE / "fx_shadow.jsonl"
+#: これより広いスプレッドでは、どの判断でも建てない（異常な値段を防ぐ安全網。ふだんの判断は fx_spread）
+SPREAD_HARD_CAP = 20.0
+
+
+def spread_check(decision: dict, ctx: "Context") -> fx_spread.SpreadVerdict | None:
+    """建てる判断のスプレッドを、その都度の値段とふだんの幅から判断する（建てる判断でなければ None）。"""
+    if not str(decision.get("action", "")).startswith("open"):
+        return None
+    symbol = decision.get("symbol")
+    quote = ctx.quotes.get(symbol)
+    if quote is None:
+        return None
+    bars = ctx.bars.get(symbol)
+    return fx_spread.judge(quote["spread"], stop_pips=decision.get("stop_pips"), hold_minutes=decision.get("hold_minutes"),
+                           normal=fx_spread.normal_spread(bars, ctx.now),
+                           typical=fx_spread.normal_spread(bars, ctx.now, same_hour=False))
 
 
 def trade_shadow(name: str, ctx: "Context", session, shadow_log: list[dict], shadow_book: dict) -> None:
@@ -1058,6 +1082,9 @@ def trade_shadow(name: str, ctx: "Context", session, shadow_log: list[dict], sha
             decision, ctx.live_frame, equity=equity, holding=position.symbol if position else None,
             spread_pips={s: q["spread"] for s, q in ctx.quotes.items()},
             prices={s: q["ask"] for s, q in ctx.quotes.items()}, instruments=ctx.insts, halted=False)
+        verdict = spread_check(decision, ctx)
+        if verdict is not None and approved is not None and not verdict.ok:
+            approved, rejected = None, verdict.text
         if approved is not None and approved.action != "close":
             units = min(abs(approved.units), session.config.units_cap(name)) * (1 if approved.units > 0 else -1)
             if abs(units) < session.config.min_units:

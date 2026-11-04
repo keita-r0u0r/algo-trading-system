@@ -188,6 +188,72 @@ from ..application.fx_health import decider_health  # noqa: E402,F401
 
 
 # --- 判断を人が読める文にする ---------------------------------------------------------
+SETUP_LABELS = {"trend": "流れに乗る", "pullback": "押し目・戻り", "reversal": "行き過ぎの戻り", "breakout": "節目抜け",
+                "range": "範囲の上下", "jev": "Jev の見込み"}
+CONFIDENCE_LABELS = {"high": "高い", "medium": "中くらい", "low": "低い"}
+CARRY_PLAN = {"取引の形": "金利差＋流れ（日をまたいで持つ）",
+              "閉じる条件": "金利差がプラスでなくなるか、前の営業日の終値が50営業日の平均を割ったら（損切り150 pips）",
+              "保有の目安": "条件が続く限り"}
+
+
+def _plan_fields(d: dict[str, Any]) -> dict[str, str]:
+    """建てる判断から、持っている間ずっと見せる欄（取引の形・予想・閉じる条件・保有の目安・決済の手法）。"""
+    out = {"取引の形": SETUP_LABELS.get(d.get("setup") or "", ""),
+           "予想": (f"{d['target_price']} まで・{d['invalidation_price']} で崩れる" if d.get("target_price") and d.get("invalidation_price")
+                    else f"{d['invalidation_price']} で崩れる" if d.get("invalidation_price") else ""),
+           "閉じる条件": d.get("exit_condition") or "",
+           "保有の目安": f"{float(d['hold_minutes']):.0f}分" if d.get("hold_minutes") else "",
+           "決済の手法": d.get("exit_method") or ""}
+    return {k: v for k, v in out.items() if v}
+
+
+def decision_fields(events: Sequence[dict[str, Any]]) -> list[dict[str, str]]:
+    """判断の記録（live_decision）ごとの、表とカードに出す欄。空欄を減らすため、次を補う。
+
+      * 通ったか: 様子見は「注文なし（様子見）」、AI を呼ばなかった回は「AI を呼ばない回」
+      * 建玉を持っている間は、建てたときの取引の形・予想・閉じる条件・保有の目安・決済の手法を毎回出す
+      * 金利差＋流れは、決まりの閉じる条件と保有の目安を出す
+      * ハーネス・Jev が持っている間は、含み損益と最大・降りる線を「建玉の状態」に出す
+    """
+    plans: dict[str, dict[str, str]] = {}
+    held: set[str] = set()
+    rows: list[dict[str, str]] = []
+    for e in events:
+        kind, account = e.get("kind"), str(e.get("account", ""))
+        if kind == "live_open" and e.get("position_id"):
+            held.add(account)
+        elif kind in ("live_close", "live_gone") and account:
+            held.discard(account)
+            plans.pop(account, None)
+        if kind != "live_decision":
+            continue
+        d, logic = e.get("decision") or {}, e.get("logic") or {}
+        action = str(d.get("action") or "hold")
+        if action.startswith("open") and e.get("approved") and not e.get("shadow"):
+            plans[account] = _plan_fields(d)
+        if action == "hold":
+            passed = "AI を呼ばない回" if account == "ai" and not e.get("model") and not e.get("error") else "注文なし（様子見）"
+        else:
+            passed = "通った" if e.get("approved") else f"通らなかった: {e.get('rejected')}"
+        row = {"通ったか": passed,
+               "リスク": f"資金の{float(d.get('risk_fraction') or logic.get('risk_fraction') or 0):.1%}" if action.startswith("open") else "",
+               "自信": CONFIDENCE_LABELS.get(d.get("confidence"), ""),
+               "今なら建てるか": ("建てる" if d.get("would_open_now") else "建てない")
+               if account in held and "would_open_now" in d else "",
+               "この先の見込み": d.get("outlook") or "", "気にしていること": d.get("risks") or "",
+               "起こした理由": e.get("trigger") or ""}
+        row.update(_plan_fields(d) if action.startswith("open") else plans.get(account, {}) if account in held else {})
+        if account.startswith("carry_trend"):
+            row.update({k: v for k, v in CARRY_PLAN.items() if not row.get(k)})
+        if account in held and "unrealized_pips" in logic:
+            row["建玉の状態"] = (f"含み {logic['unrealized_pips']:+.1f} pips（最大 {logic.get('peak_pips', 0):+.1f}）"
+                              + (f"・降りる線 {logic['exit_level']}" if logic.get("exit_level") else "・降りる線はまだ無い（最初の損切りだけ）"))
+            if logic.get("exit_method") and not row.get("決済の手法"):
+                row["決済の手法"] = logic["exit_method"]
+        rows.append(row)
+    return rows
+
+
 def holdings_over_time(events: Sequence[dict[str, Any]]) -> list[bool | None]:
     """記録の各行の時点で、その行の判断する者が実際の建玉を持っていたか（判断の行以外は None）。"""
     held: set[str] = set()
