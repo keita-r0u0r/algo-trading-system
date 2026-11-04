@@ -253,3 +253,27 @@ def test_blocked_opens_lists_recent_rejected_entries():
                "decision": {"action": "hold"}}]
     rows = vm.blocked_opens(events, dt.datetime(2026, 11, 4, 8, 10, tzinfo=jst))
     assert [r["symbol"] for r in rows] == ["GBP_JPY"] and "スプレッド" in rows[0]["reason"]
+
+
+def test_decision_fields_fill_plan_while_holding_and_rules():
+    from jqbt.interfaces import viewmodels as vm
+
+    log = [
+        {"kind": "live_decision", "account": "ai", "approved": True, "at": "t1",
+         "decision": {"action": "open_long", "symbol": "USD_JPY", "risk_fraction": 0.01, "setup": "pullback",
+                      "target_price": 158.5, "invalidation_price": 157.9, "exit_condition": "157.9 を割ったら", "hold_minutes": 90}},
+        {"kind": "live_open", "account": "ai", "position_id": 1},
+        {"kind": "live_decision", "account": "ai", "decision": {"action": "hold"}, "at": "t2"},
+        {"kind": "live_decision", "account": "carry_trend_GBP_JPY", "decision": {"action": "hold"}, "logic": {}, "at": "t3"},
+        {"kind": "live_open", "account": "harness", "position_id": 2},
+        {"kind": "live_decision", "account": "harness", "decision": {"action": "hold"}, "at": "t4",
+         "logic": {"unrealized_pips": 5.2, "peak_pips": 9.0, "exit_level": None, "exit_method": "chandelier"}},
+        {"kind": "live_close", "account": "ai", "position_id": 1},
+        {"kind": "live_decision", "account": "ai", "decision": {"action": "hold"}, "model": "m", "at": "t5"},
+    ]
+    rows = vm.decision_fields(log)
+    assert rows[0]["通ったか"] == "通った" and rows[0]["予想"] == "158.5 まで・157.9 で崩れる"
+    assert rows[1]["通ったか"] == "AI を呼ばない回" and rows[1]["閉じる条件"] == "157.9 を割ったら" and rows[1]["保有の目安"] == "90分"
+    assert rows[2]["通ったか"] == "注文なし（様子見）" and rows[2]["保有の目安"] == "条件が続く限り"
+    assert rows[3]["建玉の状態"].startswith("含み +5.2 pips（最大 +9.0）") and rows[3]["決済の手法"] == "chandelier"
+    assert "閉じる条件" not in rows[4] and rows[4]["通ったか"] == "注文なし（様子見）"  # 閉じたあとは計画を出さない

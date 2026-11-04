@@ -1367,7 +1367,8 @@ def page_decisions() -> None:
 
 
 def live_decisions() -> None:
-    events = [e for e in live_log() if e.get("kind") == "live_decision"]
+    log = live_log()  # 建玉を持っていたかは、建てた・閉じた記録も見ないとわからない
+    events = [e for e in log if e.get("kind") == "live_decision"]
     if not events:
         st.info("まだありません（見張り役が5分ごと・急変のときに記録します）", icon=":material/hourglass_empty:")
         return
@@ -1382,37 +1383,27 @@ def live_decisions() -> None:
             return "🟢 ロジック"
         return "⚪ AI を呼ばない回"
 
-    rows = [(e, h) for e, h in zip(events, vm.holdings_over_time(events)) if e.get("kind") == "live_decision"]
+    held = [h for h, e in zip(vm.holdings_over_time(log), log) if e.get("kind") == "live_decision"]
+    rows = list(zip(events, held, vm.decision_fields(log)))
     only = st.segmented_control("表示", ["すべて", "AI が実際に判断した回だけ", "売り買いした・しようとした回だけ"],
                                 default="すべて", label_visibility="collapsed")
     if only == "AI が実際に判断した回だけ":
-        rows = [(e, h) for e, h in rows if e.get("model")]
+        rows = [r for r in rows if r[0].get("model")]
     elif only == "売り買いした・しようとした回だけ":
-        rows = [(e, h) for e, h in rows if (e.get("decision") or {}).get("action") not in ("hold", None)]
+        rows = [r for r in rows if (r[0].get("decision") or {}).get("action") not in ("hold", None)]
     table = pd.DataFrame([{
         "時刻": e["at"][5:16].replace("T", " "), "判断する者": vm.account_label(e.get("account", "")),
         "判断": vm.action_label(e.get("decision") or {}, h),
         "理由": vm.explain_decision(e, h),
-        "見た数字": ", ".join(f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")),
+        "見た数字": "" if e.get("account") in ("harness", "jev") else
+        ", ".join(f"{k}={v}" for k, v in (e.get("logic") or {}).items() if k not in ("rule", "version")),
         "出どころ": ("📝 記録だけ・" if e.get("shadow") else "") + source(e),
-        "通ったか": "" if (e.get("decision") or {}).get("action") in ("hold", None)
-        else ("通った" if e.get("approved") else f"通らなかった: {e.get('rejected')}"),
-        "リスク": f"資金の{float((e.get('decision') or {}).get('risk_fraction') or (e.get('logic') or {}).get('risk_fraction') or 0):.1%}"
-        if str((e.get("decision") or {}).get("action", "")).startswith("open") else "",
-        "自信": {"high": "高い", "medium": "中くらい", "low": "低い"}.get((e.get("decision") or {}).get("confidence"), ""),
-        "取引の形": {"trend": "流れに乗る", "pullback": "押し目・戻り", "reversal": "行き過ぎの戻り",
-                   "breakout": "節目抜け", "range": "範囲の上下"}.get((e.get("decision") or {}).get("setup"), ""),
-        "予想": (f"{d['target_price']} まで・{d['invalidation_price']} で崩れる"
-                 if (d := (e.get("decision") or {})).get("target_price") else ""),
-        "今なら建てるか": ("建てる" if (e.get("decision") or {}).get("would_open_now") else "建てない")
-        if h and "would_open_now" in (e.get("decision") or {}) else "",
-        "この先の見込み": (e.get("decision") or {}).get("outlook", "") or "",
-        "閉じる条件": (e.get("decision") or {}).get("exit_condition", "") or "",
-        "保有の目安": f"{(e.get('decision') or {}).get('hold_minutes'):.0f}分"
-        if (e.get("decision") or {}).get("hold_minutes") else "",
-        "気にしていること": (e.get("decision") or {}).get("risks", "") or "",
-        "起こした理由": e.get("trigger", "") or "",
-    } for e, h in reversed(rows)][:300])
+        **f,
+        "見送りの確認": ((e.get("logic") or {}).get("filter") or {}).get("text")
+        or ((e.get("logic") or {}).get("filter") or {}).get("error") or "",
+        "別の AI の評価": (f"{ev.get('score')}/5 {ev.get('verdict', '')}（気になる点: {ev.get('concerns', '')}）"
+                        if (ev := (e.get("logic") or {}).get("evaluation") or {}).get("score") else ev.get("error", "")),
+    } for e, h, f in reversed(rows)][:300])
     view = st.segmented_control("見せ方", ["カード（全文）", "表"], default="カード（全文）", key="decisions-view",
                                 label_visibility="collapsed")
     if table.empty:
@@ -1437,7 +1428,8 @@ def live_decisions() -> None:
 
 #: カードの見出しに出す列と、本文に全文で出す列（それ以外は「そのほか」にたたむ）
 CARD_HEAD = ("時刻", "判断する者", "判断", "通ったか", "出どころ")
-CARD_BODY = ("理由", "この先の見込み", "予想", "閉じる条件", "決済の手法", "見送りの確認", "別の AI の評価")
+CARD_BODY = ("理由", "建玉の状態", "この先の見込み", "予想", "閉じる条件", "保有の目安", "決済の手法", "見送りの確認",
+             "別の AI の評価")
 
 
 def decision_cards(rows: list[dict], limit: int = 60) -> None:
