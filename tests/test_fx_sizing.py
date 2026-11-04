@@ -55,3 +55,16 @@ def test_due_once_a_day_on_weekdays_after_seven():
     last = [{"kind": "error", "at": (NOW - dt.timedelta(hours=2)).isoformat()}]
     assert not fz.due(last, NOW)  # 失敗した回も数える
     assert fz.due([{"kind": "proposal", "at": (NOW - dt.timedelta(hours=21)).isoformat()}], NOW)
+
+
+def test_time_metrics_are_added_next_to_the_totals():
+    trades = [{"pnl": 100.0, "opened_at": "2026-11-04T09:00:00+09:00", "closed_at": "2026-11-04T11:00:00+09:00",
+               "size": 1000, "price": 150.0},
+              {"pnl": 500.0, "opened_at": "2026-11-04T09:00:00+09:00", "closed_at": "2026-11-05T09:00:00+09:00",
+               "size": 1000, "price": 150.0}]
+    m = fz.time_metrics(trades[:1])
+    assert m["yen_per_hour"] == 50.0 and m["avg_hold_hours"] == 2.0
+    assert m["yen_per_margin_hour"] == round(100 / (6000 * 2) * 10_000, 2)  # 証拠金 1000 × 150 × 4% = 6,000円
+    assert fz.time_metrics(trades[1:])["yen_per_hour"] < m["yen_per_hour"]  # 24時間で500円は、2時間で100円より遅い
+    assert fz.time_metrics([])["yen_per_hour"] is None
+    assert "time" in fz.decider_stats([], "ai", 10_000)

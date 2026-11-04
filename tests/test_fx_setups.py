@@ -135,6 +135,6 @@ def test_closed_trades_and_reentry_blocks_from_the_live_log():
     ]
     trades = fs.closed_trades(events, "harness")
     assert trades == [{"symbol": "USD_JPY", "side": 1, "pnl": -40.0, "opened_at": "2026-11-04T08:00:00+09:00",
-                       "closed_at": "2026-11-04T09:00:00+09:00"}]
+                       "closed_at": "2026-11-04T09:00:00+09:00", "size": 0.0, "price": 0.0}]
     assert 1 in fs.reentry_blocks(trades, NOW)["USD_JPY"]
     assert fs.reentry_blocks(trades, NOW + dt.timedelta(hours=2)) == {}

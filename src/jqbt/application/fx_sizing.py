@@ -21,6 +21,33 @@ PROPOSE_EVERY = dt.timedelta(hours=20)
 PROPOSE_FROM_HOUR = 7
 
 
+#: 証拠金の率（GMOコインの FX は 25倍 = 4%）。資金効率の計算に使う
+MARGIN_RATE = 0.04
+
+
+def time_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    """時間の物差し（ほかの物差しに足して見る。これだけを追うと、短く切ってマイナスを重ねることもある）。
+
+      * yen_per_hour: 損益の合計 ÷ 持っていた時間の合計（円／保有1時間）
+      * avg_hold_hours: 1回あたりの平均の保有時間
+      * yen_per_margin_hour: 損益の合計 ÷ （証拠金 × 時間）の合計 × 1万（証拠金1万円を1時間使うと何円になったか）
+    """
+    hours, margin_hours = [], 0.0
+    for t in trades:
+        try:
+            h = (dt.datetime.fromisoformat(t["closed_at"]) - dt.datetime.fromisoformat(t["opened_at"])).total_seconds() / 3600
+        except (KeyError, ValueError, TypeError):
+            continue
+        h = max(h, 1 / 60)
+        hours.append(h)
+        margin_hours += float(t.get("size") or 0) * float(t.get("price") or 0) * MARGIN_RATE * h
+    total = sum(t["pnl"] for t in trades)
+    held = sum(hours)
+    return {"hours_held": round(held, 1), "avg_hold_hours": round(held / len(hours), 1) if hours else None,
+            "yen_per_hour": round(total / held, 1) if held else None,
+            "yen_per_margin_hour": round(total / margin_hours * 10_000, 2) if margin_hours else None}
+
+
 def decider_stats(events: Iterable[dict[str, Any]], account: str, equity: float) -> dict[str, Any]:
     """判断する者の実際の成績（円）。直近20回と全体。"""
     trades = fx_setups.closed_trades(events, account)
@@ -44,7 +71,7 @@ def decider_stats(events: Iterable[dict[str, Any]], account: str, equity: float)
                 "worst_losing_streak": worst_streak, "max_drawdown_yen": round(drawdown, 1),
                 "max_drawdown_of_equity": round(drawdown / equity, 3) if equity else None}
 
-    return {"all": summary(results), "last_20": summary(results[-20:]),
+    return {"all": summary(results), "last_20": summary(results[-20:]), "time": time_metrics(trades),
             "last_trades": [{"symbol": t["symbol"], "side": "買い" if t["side"] > 0 else "売り", "pnl_yen": t["pnl"],
                              "closed_at": t["closed_at"][5:16]} for t in trades[-10:]]}
 

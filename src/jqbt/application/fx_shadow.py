@@ -80,7 +80,14 @@ def results(events: Iterable[dict[str, Any]], account: str) -> dict[str, Any]:
     closes = [e for e in events if e.get("kind") == "shadow_close" and e.get("account") == account]
     pips = [e["pips"] for e in closes]
     wins, losses = [x for x in pips if x > 0], [x for x in pips if x <= 0]
+    hours = 0.0
+    for e in closes:
+        try:
+            hours += max(1 / 60, (dt.datetime.fromisoformat(e["at"]) - dt.datetime.fromisoformat(e["opened_at"])).total_seconds() / 3600)
+        except (KeyError, ValueError, TypeError):
+            pass
     return {"trades": len(pips), "total_pips": round(sum(pips), 1),
+            "pips_per_hour": round(sum(pips) / hours, 2) if hours else None,
             "total_r": round(sum(e["r"] for e in closes if e.get("r") is not None), 2),
             "win_rate": round(len(wins) / len(pips), 2) if pips else None,
             "payoff": round((sum(wins) / len(wins)) / -(sum(losses) / len(losses)), 2) if wins and losses and sum(losses) else None}
