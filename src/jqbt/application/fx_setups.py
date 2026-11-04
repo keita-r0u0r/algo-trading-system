@@ -221,7 +221,8 @@ def closed_trades(events: Iterable[dict[str, Any]], account: str) -> list[dict[s
             pnl[pid] = pnl.get(pid, 0.0) + float(e.get("lossGain") or 0)
             closed_at[pid] = str(e.get("at", ""))
     return [{"symbol": o["symbol"], "side": 1 if o["side"] == "BUY" else -1, "pnl": round(pnl[pid], 1),
-             "opened_at": o.get("at", ""), "closed_at": closed_at[pid]}
+             "opened_at": o.get("at", ""), "closed_at": closed_at[pid],
+             "size": float(o.get("size") or 0), "price": float(o.get("price") or 0)}
             for pid, o in opens.items() if pid in pnl]
 
 

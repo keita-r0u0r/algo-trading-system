@@ -185,6 +185,8 @@ def account_kind(name: str) -> str:
 
 # 判断する者の動き具合は、健康診断の部品（application/fx_health.py）にある
 from ..application.fx_health import decider_health  # noqa: E402,F401
+from ..application.fx_setups import closed_trades  # noqa: E402
+from ..application.fx_sizing import time_metrics  # noqa: E402
 
 
 # --- 判断を人が読める文にする ---------------------------------------------------------
@@ -379,7 +381,8 @@ def decider_scorecard(events: Sequence[dict[str, Any]], account: str) -> dict[st
             "avg_loss": round(avg_loss, 1) if avg_loss is not None else None,
             "payoff": round(avg_win / -avg_loss, 2) if avg_win and avg_loss else None,
             "peaked": len(peaked),
-            "kept_of_peak": (round(sum(pnl[p] for p in peaked) / sum(best[p] for p in peaked), 2) if peaked else None)}
+            "kept_of_peak": (round(sum(pnl[p] for p in peaked) / sum(best[p] for p in peaked), 2) if peaked else None),
+            **time_metrics(closed_trades(events, account))}
 
 
 def filter_shadow_rows(events: Sequence[dict[str, Any]], account: str = "harness") -> list[dict[str, Any]]:

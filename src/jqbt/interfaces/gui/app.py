@@ -1514,13 +1514,20 @@ def compare_body() -> None:
                            "平均の勝ち": c["avg_win"], "平均の負け": c["avg_loss"],
                            "勝ち÷負け": c["payoff"], "勝率": f"{c['win_rate']:.0%}" if c["win_rate"] is not None else "",
                            "乗った含み益を残せた割合": f"{c['kept_of_peak']:.0%}（{c['peaked']}回）"
-                           if c["kept_of_peak"] is not None else ""})
+                           if c["kept_of_peak"] is not None else "",
+                           "円／保有1時間": c["yen_per_hour"], "平均の保有時間": c["avg_hold_hours"],
+                           "資金効率（証拠金1万円・1時間あたり）": c["yen_per_margin_hour"]})
     st.dataframe(pd.DataFrame(cards_rows), hide_index=True, width="stretch", column_config={
         "合計": st.column_config.NumberColumn(format="%+.0f 円"),
         "平均の勝ち": st.column_config.NumberColumn(format="%+.0f 円"),
-        "平均の負け": st.column_config.NumberColumn(format="%+.0f 円")})
+        "平均の負け": st.column_config.NumberColumn(format="%+.0f 円"),
+        "円／保有1時間": st.column_config.NumberColumn(format="%+.1f 円"),
+        "平均の保有時間": st.column_config.NumberColumn(format="%.1f 時間"),
+        "資金効率（証拠金1万円・1時間あたり）": st.column_config.NumberColumn(format="%+.2f 円")})
     st.caption("勝ち÷負けは、1回の平均の勝ちが平均の負けの何倍か。1を大きく超えるほど、勝率が低くても増える。"
-               "乗った含み益を残せた割合は、含み益が20円以上まで乗った取引で、最大の含み益のうち確定できた割合")
+               "乗った含み益を残せた割合は、含み益が20円以上まで乗った取引で、最大の含み益のうち確定できた割合。"
+               "円／保有1時間と資金効率は、資金を使っていた時間あたりにどれだけ増えたか（短い取引を繰り返すほうが速く増える"
+               "こともあるので足した物差し。これだけを追うと短く切って負けを重ねることもあるので、合計・勝ち÷負けと並べて見る）")
     from jqbt.application import fx_shadow
     from jqbt.interfaces import fx_runtime as rt
 
@@ -1530,7 +1537,8 @@ def compare_body() -> None:
         open_now = fx_shadow.book(shadow_log)
         st.dataframe(pd.DataFrame([{"判断する者": vm.account_label(name), **{
             "決済": r["trades"], "合計 pips": r["total_pips"], "合計 R": r["total_r"],
-            "勝率": f"{r['win_rate']:.0%}" if r["win_rate"] is not None else "", "勝ち÷負け": r["payoff"]},
+            "勝率": f"{r['win_rate']:.0%}" if r["win_rate"] is not None else "", "勝ち÷負け": r["payoff"],
+            "pips／保有1時間": r["pips_per_hour"]},
             "今の仮の建玉": f"{open_now[name].symbol} {'買い' if open_now[name].side > 0 else '売り'} {open_now[name].price}"
             if name in open_now else ""}
             for name in dict.fromkeys(e["account"] for e in shadow_log if e.get("account"))
