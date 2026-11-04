@@ -79,7 +79,8 @@ resource "google_artifact_registry_repository" "images" {
     id     = "keep-recent"
     action = "KEEP"
     most_recent_versions {
-      keep_count = 5
+      # 前の版に戻すときは、イメージが無ければソースから作り直す（make rollback）ので、少しだけ残す
+      keep_count = 3
     }
   }
   cleanup_policies {
