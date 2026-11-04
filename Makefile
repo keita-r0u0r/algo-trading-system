@@ -89,10 +89,12 @@ verify:
 	$(PY) scripts/fx_verify.py --version $${V:-$$(git rev-parse --short HEAD)}
 
 # 前の版に戻す（リリースログで確認が通った、今より前のいちばん新しい版。TO= で指定）。
+# その版のイメージが消えていれば、その版のソースから作り直す（scripts/fx_rebuild_image.py。Cloud Build で数分）。
 # 計画（tofu plan）を見せて、y を押したときだけ反映し、そのあと確認する。手順と、戻す前に確かめることは docs/release.md
 rollback:
 	@$(PY) scripts/fx_rollback.py $(if $(TO),--to $(TO))
 	@V=$$($(PY) scripts/fx_rollback.py --pick $(if $(TO),--to $(TO))) && \
+	$(PY) scripts/fx_rebuild_image.py $$V && \
 	$(TOFU) plan -out=rollback.tfplan -var image_tag=$$V -var app_version=$$V && \
 	read -p "版 $$V に戻します。よいですか [y/N] " answer && [ "$$answer" = y ] && \
 	$(TOFU) apply rollback.tfplan && rm -f infra/rollback.tfplan && \
