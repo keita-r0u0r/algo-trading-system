@@ -686,13 +686,21 @@ def decider_settings() -> None:
             method = d2.selectbox("決まった手法（選べなかったときも、これを使う）", list(fx_filter.EXIT_METHODS),
                                   index=list(fx_filter.EXIT_METHODS).index(current.exits.method),
                                   format_func=lambda m: f"{m}: {fx_filter.EXIT_METHODS[m]}")
+            cadence = st.selectbox("AI を呼ぶ間隔（定期の回。急変などで起こした回は必ず呼ぶ）", list(fx_filter.AI_CADENCES),
+                                   index=list(fx_filter.AI_CADENCES).index(current.ai_cadence),
+                                   format_func=fx_filter.AI_CADENCES.get)
+            budget = float(os.environ.get("AI_MONTHLY_BUDGET_USD") or 5)
+            estimate = fx_filter.AI_CADENCE_CALLS[cadence] * 0.0027
+            st.caption(f"月の目安: 約 {fx_filter.AI_CADENCE_CALLS[cadence]:,}回・約 ${estimate:.0f}（AI の月の上限は ${budget:.0f}。"
+                       + ("上限を超える見込み。超えると月末まで AI を呼べなくなるので、上限を上げるか間隔を広げる" if estimate > budget
+                          else "上限の内側") + "）。上限は infra の ai_monthly_budget_usd")
             evaluate_on = st.toggle("Jev の判断を別の AI に評価させて記録に残す（振り返り用。モデルは AI の設定の「F 判断の評価」）",
                                     value=current.evaluate, key="evaluate-jev")
             if st.form_submit_button("保存", type="primary"):
                 rt.save_settings(replace(
                     current, deciders=deciders, filter=fx_filter.FilterSettings(mode, provider, threshold),
                     updated_at=dt.datetime.now(JST).isoformat(timespec="seconds"),
-                    exits=fx_filter.ExitSettings(selector, method), evaluate=evaluate_on))
+                    exits=fx_filter.ExitSettings(selector, method), evaluate=evaluate_on, ai_cadence=cadence))
                 flash("売買の作りの設定を保存しました。次の回から効きます")
                 st.rerun()
         if current.updated_at:

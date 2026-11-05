@@ -27,6 +27,13 @@ SWITCHABLE = {"ai": "AI が判断（今の作り）",
               "carry_trend_GBP_JPY": "金利差＋流れ（ポンド円）", "carry_trend_AUD_JPY": "金利差＋流れ（豪ドル円）",
               "harness": "ハーネス＋決まりが判断（新しい作り）",
               "jev": "Jev が判断（向き・リスク・決済の手法。損切り幅は機械）"}
+#: AI を定期の回でどれだけ呼ぶか（見張り役が急変などで起こした回は、どれでも必ず呼ぶ）
+AI_CADENCES = {"15min": "15分ごと（今まで）",
+               "5min_changed": "5分ごと・変化があるときだけ（建玉を持っている間か、前回から5 pips 以上動いたとき。動かなければ最長15分）",
+               "5min_holding": "建玉を持っている間だけ5分ごと（持っていなければ15分ごと）",
+               "5min": "5分ごと（毎回）"}
+#: 月の AI の呼び出し回数の目安（平日22日・1回 約 $0.0027）。画面に費用の目安を出すため
+AI_CADENCE_CALLS = {"15min": 2_100, "5min_changed": 3_700, "5min_holding": 3_000, "5min": 6_300}
 #: 判断する者の段階。新しい判断する者・決まりは shadow（記録だけ）から始め、画面の成績を見て live に上げる。
 #: 戻すときも反映し直さず、ここを切り替える（docs/release.md）
 STAGES = {"off": "止める（新しく建てない。持っている建玉の決済は続ける）",
@@ -87,6 +94,8 @@ class FxSettings:
     sizing: dict[str, Sizing] = field(default_factory=lambda: dict(DEFAULT_SIZING))
     #: Jev が建てた・閉じた判断を、別の AI（AI の設定の「F 判断の評価」のモデル）に評価させて記録に残すか
     evaluate: bool = True
+    #: AI を定期の回でどれだけ呼ぶか（AI_CADENCES）
+    ai_cadence: str = "15min"
 
     def stage(self, name: str) -> str:
         return self.deciders.get(name, "live")
@@ -101,6 +110,7 @@ class FxSettings:
     def to_dict(self) -> dict[str, Any]:
         return {"deciders": dict(self.deciders), "filter": asdict(self.filter), "exits": asdict(self.exits),
                 "sizing": {k: asdict(v) for k, v in self.sizing.items()}, "evaluate": self.evaluate,
+                "ai_cadence": self.ai_cadence,
                 "updated_at": self.updated_at}
 
 
@@ -129,8 +139,9 @@ def parse_settings(raw: dict[str, Any] | None) -> FxSettings:
     sizing = {name: clamp_sizing((raw_sizing.get(name) or {}).get("max_units", d.max_units),
                                  (raw_sizing.get(name) or {}).get("max_risk", d.max_risk), d)
               for name, d in DEFAULT_SIZING.items()}
+    cadence = raw.get("ai_cadence") if raw.get("ai_cadence") in AI_CADENCES else "15min"
     return FxSettings(deciders, FilterSettings(mode, provider, threshold), str(raw.get("updated_at", "")), exits, sizing,
-                      bool(raw.get("evaluate", True)))
+                      bool(raw.get("evaluate", True)), cadence)
 
 
 SKIP_QUESTION = (
