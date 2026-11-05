@@ -314,3 +314,28 @@ def test_ai_cadence_setting_round_trip():
     s = fx_filter.parse_settings({"ai_cadence": "5min_changed"})
     assert s.ai_cadence == "5min_changed" and fx_filter.parse_settings(s.to_dict()) == s
     assert fx_filter.parse_settings({"ai_cadence": "?"}).ai_cadence == "15min"
+
+
+def test_jev_position_gets_a_trailing_line_from_the_atr():
+    import pandas as pd
+    from test_fx_setups import features
+
+    from jqbt.application.fx_paper import PaperAccount, PaperPosition
+
+    # 豪ドル円の買いで、最大 +79 pips まで乗ったあと戻した（11/5 の夜と同じ形）。揺れ 20 pips × 2 = 40 pips 下に線が要る
+    idx = pd.date_range("2026-11-04 09:00", periods=60, freq="1min")
+    bars = pd.DataFrame({"high": [110.52] * 20 + [111.30] + [110.90] * 39, "low": [110.50] * 60}, index=idx)
+    p = PaperPosition("AUD_JPY", 270, 110.514, 110.354, None, "2026-11-04T09:00:00+09:00")
+    account = PaperAccount("jev", 10000, 10000, p, equity=10000, day_start_equity=10000)
+
+    class Jev:
+        def ask(self, state, questions):
+            return {"answers": {"close": {"noul": 0.2}}}
+
+    ctx = harness_ctx({"AUD_JPY": features(price=110.85)}, quotes={"AUD_JPY": {"bid": 110.84, "ask": 110.86, "spread": 2}},
+                      bars={"AUD_JPY": bars}, jev=Jev())
+    events = [{"kind": "live_decision", "account": "jev", "approved": True, "at": "2026-11-04T08:59:00+09:00",
+               "decision": {"action": "open_long", "symbol": "AUD_JPY", "exit_method": "chandelier"}}]
+    d, reason, extra = rt.jev_decision(account, ctx, events)
+    assert extra["logic"]["exit_level"] == 110.9  # 111.30 − 2 × 20 pips
+    assert d["action"] == "close" and "110.9" in reason  # 今の値段 110.85 は線を割っている

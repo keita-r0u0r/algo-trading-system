@@ -181,8 +181,12 @@ def peak_pips(bars: pd.DataFrame, side: int, entry_price: float, opened_at: dt.d
 
 def exit_check(*, side: int, entry_price: float, stop_pips: float, price: float, bars: pd.DataFrame | None,
                opened_at: dt.datetime, now: dt.datetime, f: dict[str, Any] | None, method: str | None = None,
-               rules: HarnessRules = HarnessRules()) -> ExitCheck:
-    """建玉を、決まりで閉じるか。``price`` は今の値段（仲値）、``bars`` は1分足（建てる前を含んでよい）。"""
+               rules: HarnessRules = HarnessRules(), trend_exit: bool = True) -> ExitCheck:
+    """建玉を、決まりで閉じるか。``price`` は今の値段（仲値）、``bars`` は1分足（建てる前を含んでよい）。
+
+    ``f``（特徴量）は、降りる線の揺れの幅（1時間足の ATR）と、流れが逆を向いたかの確かめに使う。
+    ``trend_exit`` を False にすると、流れの確かめはしない（流れで建てていない判断する者。降りる線は引く）。
+    """
     method = method if method in fx_exits.METHODS else rules.exit_method
     since = since_open(bars, opened_at) if bars is not None else pd.DataFrame()
     unrealized = side * (price - entry_price) / PIP
@@ -195,7 +199,7 @@ def exit_check(*, side: int, entry_price: float, stop_pips: float, price: float,
         if side * (price - level) <= 0:
             return ExitCheck(True, f"決済の手法（{fx_exits.METHODS[method]}）の線 {level} を割った"
                                    f"（最大 {peak:+.1f} pips → 今 {unrealized:+.1f} pips）", peak, unrealized, level, evidence)
-    if f:
+    if f and trend_exit:
         now_side, why = trend(f, rules)
         evidence += why
         if now_side == -side:
