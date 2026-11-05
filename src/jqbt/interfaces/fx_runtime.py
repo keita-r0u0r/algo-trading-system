@@ -682,7 +682,8 @@ def jev_decision(account: PaperAccount, ctx: "Context", events: list[dict]) -> t
         price = (quote["bid"] + quote["ask"]) / 2
         stop = abs(p.price - p.stop) / 0.01 if p.stop else JEV_RULES.min_stop_pips
         result = fx_setups.exit_check(side=side, entry_price=p.price, stop_pips=stop, price=price, bars=bars,
-                                      opened_at=opened, now=ctx.now, f=None, method=method,
+                                      opened_at=opened, now=ctx.now, f=features.get(p.symbol), method=method,
+                                      trend_exit=False,  # 降りる線の揺れの幅には特徴量が要る（以前は渡しておらず、線が引けなかった）
                                       rules=replace(HARNESS, hold_minutes=JEV_RULES.hold_minutes))
         logic = {**record, "symbol": p.symbol, "exit_method": method, "exit_level": result.exit_level,
                  "peak_pips": round(result.peak_pips, 1), "unrealized_pips": round(result.unrealized_pips, 1),
