@@ -613,7 +613,8 @@ resource "google_compute_instance" "watcher" {
           Environment="HOME=/home/watcher"
           ExecStartPre=/bin/mkdir -p /home/watcher
           ExecStartPre=/usr/bin/docker-credential-gcr configure-docker --registries ${var.region}-docker.pkg.dev
-          ExecStartPre=/bin/bash -c 'M=http://metadata.google.internal/computeMetadata/v1/instance/attributes; IMG=$$(curl -sf -H "Metadata-Flavor: Google" $$M/image) && ENV=$$(curl -sf -H "Metadata-Flavor: Google" $$M/watch-env) && printf "%%s\\n" "$$ENV" > /home/watcher/env && printf "%%s" "$$IMG" > /home/watcher/image && printf "%%s\\n%%s" "$$IMG" "$$ENV" > /home/watcher/applied'
+          ExecStartPre=-/usr/bin/docker rm -f fx-watch
+          ExecStartPre=/bin/bash -c 'M=http://metadata.google.internal/computeMetadata/v1/instance/attributes; curl -sf -H "Metadata-Flavor: Google" -o /home/watcher/image $$M/image && curl -sf -H "Metadata-Flavor: Google" -o /home/watcher/env $$M/watch-env && cat /home/watcher/image /home/watcher/env | md5sum > /home/watcher/applied'
           ExecStart=/bin/bash -c 'exec /usr/bin/docker run --rm --name=fx-watch --log-driver=gcplogs --env-file /home/watcher/env $$(cat /home/watcher/image) python scripts/fx_watch.py'
           ExecStop=/usr/bin/docker stop fx-watch
           Restart=always
@@ -628,7 +629,7 @@ resource "google_compute_instance" "watcher" {
           [Service]
           Type=oneshot
           Environment="HOME=/home/watcher"
-          ExecStart=/bin/bash -c 'M=http://metadata.google.internal/computeMetadata/v1/instance/attributes; IMG=$$(curl -sf -H "Metadata-Flavor: Google" $$M/image) || exit 0; ENV=$$(curl -sf -H "Metadata-Flavor: Google" $$M/watch-env) || exit 0; [ "$$(printf "%%s\\n%%s" "$$IMG" "$$ENV")" ="$$(cat /home/watcher/applied 2>/dev/null)" ] && exit 0; /usr/bin/docker-credential-gcr configure-docker --registries ${var.region}-docker.pkg.dev && /usr/bin/docker pull "$$IMG" && systemctl restart fx-watch.service'
+          ExecStart=/bin/bash -c 'set -o pipefail; M=http://metadata.google.internal/computeMetadata/v1/instance/attributes; SIG=$$(curl -sf -H "Metadata-Flavor: Google" $$M/image $$M/watch-env | md5sum) || exit 0; [ "$$SIG" = "$$(cat /home/watcher/applied 2>/dev/null)" ] && exit 0; IMG=$$(curl -sf -H "Metadata-Flavor: Google" $$M/image) || exit 0; /usr/bin/docker-credential-gcr configure-docker --registries ${var.region}-docker.pkg.dev && /usr/bin/docker pull "$$IMG" && systemctl restart fx-watch.service'
       - path: /etc/systemd/system/fx-watch-update.timer
         permissions: "0644"
         content: |
