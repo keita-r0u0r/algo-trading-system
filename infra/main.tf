@@ -179,10 +179,11 @@ resource "google_cloud_run_v2_service" "gui" {
       resources {
         limits = {
           cpu    = "1"
-          memory = "2Gi"
+          memory = "1Gi"
         }
-        # 画面を開いていない間も、台帳の複製を止めない
-        cpu_idle          = false
+        # 画面を使っている（要求を処理している）間だけ CPU を割り当てて課金する。国内株の台帳の複製は、国内株を
+        # 動かしていない（準備中）ので止まってよい。常時割り当て（false）だと、開いたままの画面で一日中課金される
+        cpu_idle          = true
         startup_cpu_boost = true
       }
 

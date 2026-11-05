@@ -238,7 +238,7 @@ REFRESH_CHOICES = {"止める": None, "10秒": 10, "30秒": 30, "60秒": 60}
 
 def refresh_seconds() -> int | None:
     """画面の自動更新の間隔（サイドバーで選ぶ）。"""
-    return REFRESH_CHOICES.get(st.session_state.get("refresh", "30秒"))
+    return REFRESH_CHOICES.get(st.session_state.get("refresh", "止める"))
 
 
 def live(render):
@@ -1945,7 +1945,8 @@ with st.sidebar:
             st.success("健康診断: 正常")
     except Exception as exc:  # 診断そのものが壊れても、画面は出す（壊れたことは見せる）
         st.error(f"健康診断を実行できない: {type(exc).__name__}")
-    st.segmented_control("画面の自動更新", list(REFRESH_CHOICES), key="refresh", default="30秒")
+    # 既定は止める。開いたままの画面が自動で更新し続けると、Cloud Run が一日中起きて課金される
+    st.segmented_control("画面の自動更新", list(REFRESH_CHOICES), key="refresh", default="止める")
     if st.button("今すぐ更新", icon=":material/refresh:", width="stretch"):
         quotes.clear()
         st.rerun()
