@@ -1031,11 +1031,14 @@ def trade_live(ctx: "Context") -> bool:
     shadow_log = read_jsonl(SHADOW_LOG)
     shadow_book = fx_shadow.book(shadow_log)
     for name in session.config.accounts:
-        if ctx.settings.stage(name) == "shadow":
+        stage = ctx.settings.stage(name)
+        if stage == "shadow":
             trade_shadow(name, ctx, session, shadow_log, shadow_book)
-            continue
+            if session.position_of(name) is None:
+                continue
+            # 本番から記録だけに下げる前に建てた実際の建玉は、決済まで本番の判断で面倒を見る（新しくは建てない）
         view = live_view(name, session)
-        switched_on = ctx.settings.enabled(name)
+        switched_on = stage == "live"
         if not switched_on and view.position is None:
             continue  # 画面で止めている（建玉があれば、決済の判断だけは続ける）
         account_frame = ctx.live_frame
@@ -1051,7 +1054,8 @@ def trade_live(ctx: "Context") -> bool:
                 prices={s: q["ask"] for s, q in ctx.quotes.items()}, instruments=ctx.insts, halted=False,
             )
             if approved is not None and approved.action != "close" and not switched_on:
-                approved, rejected = None, "画面で止めている（新しく建てない。建玉の決済は続ける）"
+                approved, rejected = None, ("記録だけの段階なので、実際には新しく建てない（前に建てた建玉の決済は続ける）"
+                                            if stage == "shadow" else "画面で止めている（新しく建てない。建玉の決済は続ける）")
             if approved is not None and approved.action != "close":
                 problem = exit_time_problem(str(decision.get("exit_condition") or ""), decision.get("hold_minutes"), ctx.now)
                 if problem:
