@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from dataclasses import replace
 from typing import Any, Iterable
 
 from . import fx_filter, fx_setups
@@ -139,5 +140,4 @@ def apply(settings: fx_filter.FxSettings, proposal: dict[str, Any], now: dt.date
     for c in proposal.get("changes") or []:
         default = settings.sizing_for(c["account"])
         sizing[c["account"]] = fx_filter.clamp_sizing(c["to"]["max_units"], c["to"]["max_risk"], default)
-    return fx_filter.FxSettings(settings.deciders, settings.filter, now.isoformat(timespec="seconds"),
-                                settings.exits, sizing, settings.evaluate)
+    return replace(settings, updated_at=now.isoformat(timespec="seconds"), sizing=sizing)

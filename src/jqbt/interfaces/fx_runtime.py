@@ -492,7 +492,10 @@ def build_context(ai, *, trigger: str = "", risk: str = "medium", accounts: dict
     return Context(api=api, now=now, frame=frame, carry_frame=carry_frame, live_frame=live_frame, insts=insts, quotes=quotes, bars=bars,
                    ai=ai, today_rates=rates_summary(now.date()) if ai is not None else {},
                    short=short_rates(now.date()), ai_cache={}, trigger=trigger,
-                   ai_last=ai_last_called(), ai_due=ai_due(trigger), calendar=load_calendar(now),
+                   ai_last=ai_last_called(),
+                   ai_due=ai_due(trigger, cadence=settings.ai_cadence, holding="ai" in book_from_events(fx_live_log.load()),
+                                 mids={sym: (q["bid"] + q["ask"]) / 2 for sym, q in quotes.items()}),
+                   calendar=load_calendar(now),
                    daily=daily_for_features(api, now) if ai is not None else {},  # 前回の時刻は、ai_due が書き換える前に読む
                    settings=settings, jev=jev)
 
@@ -916,13 +919,27 @@ def ai_skip_reason(ctx: "Context") -> str:
         return "AI を呼ばなかった（前回の時刻がわからない）"
     minutes = (ctx.now - ctx.ai_last).total_seconds() / 60
     next_at = ctx.ai_last + dt.timedelta(seconds=AI_INTERVAL_SECONDS)
-    return (f"前回 AI を呼んだのは {ctx.ai_last:%H:%M}（{minutes:.0f}分前）で、まだ15分たっていない。"
-            f"この回は5分ごとの定期の回で、見張り役が急変などで起こした回でもないので、AI は呼ばずに今の建玉のままにした。"
-            f"次に AI を呼ぶのは {next_at:%H:%M} ごろか、急変・損切り/利確の近く・時間帯の切り替わりで起こされたとき")
+    cadence = fx_filter.AI_CADENCES.get(ctx.settings.ai_cadence, "")
+    return (f"前回 AI を呼んだのは {ctx.ai_last:%H:%M}（{minutes:.0f}分前）。AI を呼ぶ間隔の設定は「{cadence}」で、"
+            f"この回は呼ぶ条件に当たらない（見張り役が急変などで起こした回でもない）ので、AI は呼ばずに今の建玉のままにした。"
+            f"遅くとも {next_at:%H:%M} ごろ、または急変・損切り/利確の近く・時間帯の切り替わりで起こされたときに呼ぶ")
 
 
-def ai_due(trigger: str) -> bool:
-    """この回で AI を呼ぶか。見張り役が起こした回は必ず。そうでなければ前回から AI_INTERVAL_SECONDS たったら。"""
+#: 前回 AI を呼んだときの値段（「変化があるときだけ」の判断に使う）
+AI_LAST_MIDS = STATE / "fx_ai_last_mids.json"
+#: 「変化があるときだけ」で、前回 AI を呼んだときから何 pips 動いたら呼ぶか
+AI_CHANGE_PIPS = 5.0
+
+
+def ai_due(trigger: str, *, cadence: str = "15min", holding: bool = False, mids: dict[str, float] | None = None) -> bool:
+    """この回で AI を呼ぶか。見張り役が起こした回は必ず。それ以外は、画面で選んだ間隔（fx_filter.AI_CADENCES）で決める。
+
+      * 15min: 前回から AI_INTERVAL_SECONDS たったら
+      * 5min: 毎回
+      * 5min_holding: AI の建玉を持っていれば毎回、持っていなければ15分ごと
+      * 5min_changed: 建玉を持っているか、前回 AI を呼んだときからどれかの通貨ペアが AI_CHANGE_PIPS 以上動いたら毎回。
+        動かなければ15分ごと
+    """
     now = dt.datetime.now(JST)
     try:
         last = dt.datetime.fromisoformat(AI_LAST.read_text(encoding="utf-8").strip()) if AI_LAST.exists() else None
@@ -930,10 +947,26 @@ def ai_due(trigger: str) -> bool:
         last = None
     # 機械が決済の線を持つ建玉（harness・jev）だけの理由で起こされた回では、AI は呼ばない（費用と、判断を混ぜないため）
     for_ai = bool(trigger) and not any(f"{name} の建玉" in trigger for name in ("harness", "jev"))
-    due = for_ai or last is None or (now - last).total_seconds() >= AI_INTERVAL_SECONDS - 60
+    interval_passed = last is None or (now - last).total_seconds() >= AI_INTERVAL_SECONDS - 60
+    if cadence == "5min":
+        regular = True
+    elif cadence == "5min_holding":
+        regular = holding or interval_passed
+    elif cadence == "5min_changed":
+        try:
+            before = json.loads(AI_LAST_MIDS.read_text(encoding="utf-8")) if AI_LAST_MIDS.exists() else {}
+        except (OSError, ValueError):
+            before = {}
+        moved = any(abs(price - before[s]) / 0.01 >= AI_CHANGE_PIPS for s, price in (mids or {}).items() if s in before)
+        regular = holding or moved or not before or interval_passed
+    else:
+        regular = interval_passed
+    due = for_ai or regular
     if due:
         try:
             AI_LAST.write_text(now.isoformat(timespec="seconds"), encoding="utf-8")
+            if mids:
+                AI_LAST_MIDS.write_text(json.dumps(mids), encoding="utf-8")
         except OSError:
             pass
     return due

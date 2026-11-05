@@ -17,6 +17,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setattr(rt, "STARTED", tmp_path / "fx_started")
     monkeypatch.setattr(rt, "WATCH_STATE", tmp_path / "fx_watch.json")
     monkeypatch.setattr(rt, "AI_LAST", tmp_path / "fx_ai_last")
+    monkeypatch.setattr(rt, "AI_LAST_MIDS", tmp_path / "fx_ai_last_mids.json")
     return tmp_path
 
 
@@ -293,3 +294,23 @@ def test_shadow_book_opens_hits_stop_and_reports_results():
     assert hit["reason"] == "損切り" and hit["pips"] == -15.0 and hit["r"] == -1.0 and hit["yen"] == -45.0
     assert fx_shadow.book([opened, hit]) == {}
     assert fx_shadow.results([opened, hit], "jev")["total_r"] == -1.0
+
+
+def test_ai_cadence_can_be_switched(state):
+    assert rt.ai_due("")  # 初回
+    assert not rt.ai_due("")  # 15分ごと（今まで）
+    assert rt.ai_due("", cadence="5min")
+    assert not rt.ai_due("", cadence="5min_holding")
+    assert rt.ai_due("", cadence="5min_holding", holding=True)
+    assert rt.ai_due("", cadence="5min_changed", mids={"USD_JPY": 158.00})  # 前回の値段が無ければ呼ぶ
+    assert not rt.ai_due("", cadence="5min_changed", mids={"USD_JPY": 158.03})  # 3 pips しか動いていない
+    assert rt.ai_due("", cadence="5min_changed", mids={"USD_JPY": 158.06})  # 6 pips 動いた
+    assert rt.ai_due("", cadence="5min_changed", holding=True, mids={"USD_JPY": 158.06})  # 持っていれば毎回
+
+
+def test_ai_cadence_setting_round_trip():
+    from jqbt.application import fx_filter
+
+    s = fx_filter.parse_settings({"ai_cadence": "5min_changed"})
+    assert s.ai_cadence == "5min_changed" and fx_filter.parse_settings(s.to_dict()) == s
+    assert fx_filter.parse_settings({"ai_cadence": "?"}).ai_cadence == "15min"
