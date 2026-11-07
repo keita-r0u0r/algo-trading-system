@@ -412,6 +412,28 @@ resource "google_cloud_scheduler_job" "fx_paper" {
   depends_on = [google_project_service.apis]
 }
 
+# cron は1本では「月曜 7:00〜土曜 7:00」を書けないので、日中と夜の2本に分ける
+resource "google_cloud_scheduler_job" "fx_paper_night" {
+  count = length(google_cloud_run_v2_job.fx_paper)
+
+  name      = "${local.name}-fx-paper-night"
+  region    = var.region
+  schedule  = var.fx_paper_schedule_night
+  time_zone = "Asia/Tokyo"
+  paused    = var.fx_paper_paused
+
+  http_target {
+    http_method = "POST"
+    uri         = "https://run.googleapis.com/v2/projects/${var.project}/locations/${var.region}/jobs/${google_cloud_run_v2_job.fx_paper[0].name}:run"
+    oauth_token {
+      service_account_email = google_service_account.scheduler.email
+      scope                 = "https://www.googleapis.com/auth/cloud-platform"
+    }
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
 # --- IAP のログイン（OAuth クライアント） --------------------------------------------
 # 組織に属していないプロジェクトでは、Google が用意する OAuth クライアントが使えない
 # （画面を開くと「Empty Google Account OAuth client ID(s)/secret(s)」）。自分で作ったものを使う。
