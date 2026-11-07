@@ -232,6 +232,9 @@ def fx_events() -> list[dict]:
     return fx_paper_log.load()
 
 
+from jqbt.application.fx_health import market_is_open  # noqa: E402
+from jqbt.infrastructure.gmo_fx import GmoFxClient  # noqa: E402
+
 JST = dt.timezone(dt.timedelta(hours=9))
 REFRESH_CHOICES = {"止める": None, "10秒": 10, "30秒": 30, "60秒": 60}
 
@@ -915,6 +918,15 @@ def page_overview() -> None:
     live(live_overview if venue() == "live" else home_body)()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def market_status() -> str | None:
+    """GMOコインの市場の状態（OPEN / CLOSE / MAINTENANCE）。取れなければ None（時刻で判定する）。"""
+    try:
+        return GmoFxClient().status()
+    except Exception:  # noqa: BLE001  状態が取れなくても画面は出す
+        return None
+
+
 def health_findings(events: list[dict] | None = None) -> list:
     """健康診断（application/fx_health.py）。画面の上と、反映後の確認が同じものを使う。"""
     from jqbt.application.fx_health import check_all
@@ -925,7 +937,7 @@ def health_findings(events: list[dict] | None = None) -> list:
                      accounts=LiveConfig().accounts,
                      live_enabled=os.environ.get("FX_LIVE_ENABLED", "").lower() == "true",
                      killed=KILL_LIVE.exists(), paper_paused=PAUSE_PAPER.exists(),
-                     calendar=econ_calendar.read(CALENDAR))
+                     calendar=econ_calendar.read(CALENDAR), market_status=market_status())
 
 
 def health_panel(events: list[dict]) -> None:
@@ -1227,7 +1239,7 @@ def live_overview() -> None:
     with st.container(border=True):
         st.markdown("**判断する者ごとの今の状態**（見張り役が5分ごと・急変のときに判断。AI は15分ごと・急変のとき）")
         now_jst = dt.datetime.now(JST)
-        market_open = bool(prices)
+        market_open = market_is_open(now_jst, market_status())
         latest: dict[str, tuple[dict, bool | None]] = {}
         for e, holding in zip(events, vm.holdings_over_time(events)):
             if e.get("kind") == "live_decision":

@@ -119,3 +119,19 @@ def test_positions_of_unknown_deciders_are_flagged():
     findings = check_all(dt.datetime(2026, 11, 4, 10, tzinfo=jst), watch={}, live_events=events, accounts=["ai", "jev"],
                          live_enabled=True, killed=False, paper_paused=False)
     assert not [f for f in findings if f.name == "管理していない建玉"]
+
+
+def test_market_status_decides_when_known_and_time_otherwise():
+    from jqbt.application.fx_health import market_is_open
+
+    saturday = dt.datetime(2026, 11, 7, 15, 0, tzinfo=JST)
+    assert not market_is_open(saturday)
+    assert not market_is_open(NOW, "CLOSE") and not market_is_open(NOW, "MAINTENANCE")
+    assert market_is_open(saturday, "OPEN") and market_is_open(NOW)
+
+
+def test_closed_market_status_silences_stopped_deciders():
+    stale = [{"kind": "live_decision", "account": "ai", "at": "2026-11-02T05:56:00+09:00", "decision": {"action": "hold"}}]
+    closed = check_all(NOW, watch={}, live_events=stale, accounts=["ai"], live_enabled=True, killed=False,
+                       paper_paused=False, market_status="CLOSE")
+    assert [f.state for f in closed if f.name == "ai"] == ["info"]

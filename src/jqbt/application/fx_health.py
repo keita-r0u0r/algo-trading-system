@@ -57,6 +57,14 @@ def market_open(now: dt.datetime) -> bool:
     return True
 
 
+def market_is_open(now: dt.datetime, status: str | None = None) -> bool:
+    """市場が開いているか。GMOコインの状態（OPEN / CLOSE / MAINTENANCE）が分かればそれで、分からなければ時刻で決める。
+
+    値段が取れるかでは判定しない（GMOコインは閉まっている間も、最後の値段を返す）。
+    """
+    return status == "OPEN" if status else market_open(now)
+
+
 def _at(value: Any) -> dt.datetime | None:
     try:
         return dt.datetime.fromisoformat(str(value))
@@ -105,9 +113,9 @@ def decider_health(events: Sequence[dict[str, Any]], name: str, now: dt.datetime
 
 def check_all(now: dt.datetime, *, watch: dict[str, Any], live_events: Sequence[dict[str, Any]],
               accounts: Sequence[str], live_enabled: bool, killed: bool, paper_paused: bool,
-              calendar: dict[str, Any] | None = None) -> list[Finding]:
-    """全部の確認。悪い順（bad → warn → info → ok）に並べて返す。"""
-    is_open = market_open(now)
+              calendar: dict[str, Any] | None = None, market_status: str | None = None) -> list[Finding]:
+    """全部の確認。悪い順（bad → warn → info → ok）に並べて返す。``market_status`` は GMOコインの状態（無ければ時刻で判定）。"""
+    is_open = market_is_open(now, market_status)
     findings: list[Finding] = []
 
     # 見張り役
@@ -118,7 +126,7 @@ def check_all(now: dt.datetime, *, watch: dict[str, Any], live_events: Sequence[
                                 "急変への随時判断ができない。" + covered,
                                 "fx_watch_enabled = true で反映したか確かめる。わからなければ Claude に「見張り役が動いていない」と伝える"))
     elif not is_open:
-        findings.append(Finding("見張り役", "info", "市場が閉まっている（土曜 7:00〜月曜 7:00）", "なし", "なし"))
+        findings.append(Finding("見張り役", "info", "市場が閉まっている（週末・毎朝の休止・メンテナンス）", "なし", "なし"))
     elif tick is None or now - tick > dt.timedelta(minutes=TICK_STALE_MINUTES):
         minutes = (now - tick).total_seconds() / 60 if tick else None
         since = f"{tick:%H:%M} から {minutes:.0f}分" if tick else "起動してから"
