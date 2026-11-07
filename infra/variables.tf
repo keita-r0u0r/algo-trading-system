@@ -52,12 +52,17 @@ variable "iap_oauth_client_id" {
 
 variable "fx_paper_schedule" {
   description = <<-EOT
-    FX のペーパー運用を動かす時刻（cron、日本時間）。既定は月〜土の毎時1分（土曜の朝まで市場が開いている）。
-    市場が閉まっていればスクリプトが何もしないので、広めに書いてよい。
-    費用を抑えるなら平日の日中だけ（例: "1 9-18 * * 1-5"）
+    5分ごとのジョブ（見張り役の控え）を動かす時刻（cron、日本時間）。既定は市場が開いている間のうち、月〜金の 7:00〜23:55。
+    残りの夜の分は fx_paper_schedule_night。費用を抑えるなら間隔を広げる（例: "*/15 7-23 * * 1-5"）
   EOT
   type        = string
-  default     = "1 * * * 1-6"
+  default     = "*/5 7-23 * * 1-5"
+}
+
+variable "fx_paper_schedule_night" {
+  description = "同じジョブの、火〜土の 0:00〜6:55（cron、日本時間）。fx_paper_schedule と合わせて、月曜 7:00〜土曜 6:55 になる"
+  type        = string
+  default     = "*/5 0-6 * * 2-6"
 }
 
 variable "fx_live_egress" {
