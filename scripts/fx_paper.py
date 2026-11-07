@@ -47,6 +47,21 @@ def build_ai():
     return build_assistant()
 
 
+def verify_release() -> None:
+    """新しい版が動いているかを確かめて、リリースログに残す（売買には関わらない。失敗しても、この回は止めない）。"""
+    version = os.environ.get("JQBT_VERSION", "")
+    if not version or version == "unknown":
+        return
+    try:
+        import fx_verify
+
+        state = fx_verify.auto_verify(*fx_verify.reader(), version)
+        if state:
+            print(f"版 {version} の確認: {state}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"版 {version} の確認に失敗: {type(exc).__name__}: {str(exc)[:200]}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--status", action="store_true", help="口座の状態を見るだけ（進めない）")
@@ -99,6 +114,7 @@ def main() -> int:
             detail = f"{e.get('symbol', '')} {e.get('units', 0):+,.0f} @ {e.get('price', e.get('exit_price', ''))}"
             pnl = f" 損益 {e['pnl']:+,.0f}円" if "pnl" in e else ""
             print(f"  [{e['account']}] {e['kind']} {detail}{pnl} {e.get('reason', '')}")
+    verify_release()
     return 0
 
 
