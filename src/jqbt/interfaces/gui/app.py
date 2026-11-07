@@ -33,6 +33,7 @@ from jqbt.interfaces import viewmodels as vm
 from jqbt.interfaces.composition import DataRequest, load_panel
 from jqbt.application.fx_live_trade import LiveConfig
 from jqbt.interfaces.extensions import GuiContext, enabled_names, load
+from jqbt.interfaces.gui.idle import IDLE_MINUTES, idle_script
 from jqbt.strategies import REGISTRY
 from jqbt.strategies.fx import BollingerRevert, EmaCross, RandomFx, RangeBreakout
 
@@ -1962,6 +1963,8 @@ with st.sidebar:
     if st.button("今すぐ更新", icon=":material/refresh:", width="stretch"):
         quotes.clear()
         st.rerun()
+    st.caption(f"{IDLE_MINUTES}分操作がないと、費用を抑えるために接続を切ります（売買の仕組みは動き続けます）")
     st.caption(DISCLAIMER)
+    st.iframe(idle_script(refresh_seconds() is not None), height=1)
 
 navigation.run()
