@@ -932,10 +932,13 @@ def health_findings(events: list[dict] | None = None) -> list:
     """健康診断（application/fx_health.py）。画面の上と、反映後の確認が同じものを使う。"""
     from jqbt.application.fx_health import check_all
     from jqbt.infrastructure import econ_calendar
+    from jqbt.interfaces import fx_runtime as rt
     from jqbt.interfaces.fx_runtime import CALENDAR
 
+    settings = rt.load_settings()
     return check_all(dt.datetime.now(JST), watch=watcher_state(), live_events=live_log() if events is None else events,
                      accounts=LiveConfig().accounts,
+                     not_live=[n for n in LiveConfig().accounts if settings.stage(n) != "live"],
                      live_enabled=os.environ.get("FX_LIVE_ENABLED", "").lower() == "true",
                      killed=KILL_LIVE.exists(), paper_paused=PAUSE_PAPER.exists(),
                      calendar=econ_calendar.read(CALENDAR), market_status=market_status())
@@ -1245,14 +1248,19 @@ def live_overview() -> None:
         for e, holding in zip(events, vm.holdings_over_time(events)):
             if e.get("kind") == "live_decision":
                 latest[e["account"]] = (e, holding)
+        from jqbt.interfaces import fx_runtime as rt
+
+        settings = rt.load_settings()
         owners_now = {r["判断する者"]: r for r in positions}
         rows = []
         for name in LiveConfig().accounts:
             e, holding = latest.get(name, ({}, None))
             d = e.get("decision") or {}
             started = watcher_state().get("started_at")
-            health = vm.decider_health(events, name, now_jst, market_open=market_open,
-                                       restarted_at=dt.datetime.fromisoformat(started) if started else None)
+            stage = settings.stage(name)
+            health = ({"state": "", "text": "記録だけ" if stage == "shadow" else "止めている"} if stage != "live" else
+                      vm.decider_health(events, name, now_jst, market_open=market_open,
+                                        restarted_at=dt.datetime.fromisoformat(started) if started else None))
             if health["state"] == "bad":
                 st.error(f"{vm.account_label(name)}: {health['text']}")
             held = owners_now.get(vm.account_label(name))

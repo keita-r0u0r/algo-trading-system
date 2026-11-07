@@ -113,7 +113,8 @@ def decider_health(events: Sequence[dict[str, Any]], name: str, now: dt.datetime
 
 def check_all(now: dt.datetime, *, watch: dict[str, Any], live_events: Sequence[dict[str, Any]],
               accounts: Sequence[str], live_enabled: bool, killed: bool, paper_paused: bool,
-              calendar: dict[str, Any] | None = None, market_status: str | None = None) -> list[Finding]:
+              calendar: dict[str, Any] | None = None, market_status: str | None = None,
+              not_live: Sequence[str] = ()) -> list[Finding]:
     """全部の確認。悪い順（bad → warn → info → ok）に並べて返す。``market_status`` は GMOコインの状態（無ければ時刻で判定）。"""
     is_open = market_is_open(now, market_status)
     findings: list[Finding] = []
@@ -154,6 +155,8 @@ def check_all(now: dt.datetime, *, watch: dict[str, Any], live_events: Sequence[
 
     # 判断する者
     for name in accounts:
+        if name in not_live:  # 画面で「記録だけ」「止める」にした者は、判断の記録が無くて当たり前
+            continue
         h = decider_health(live_events, name, now, market_open=is_open, restarted_at=started)
         impact, action = "", ""
         if h["state"] == "bad" and h["text"].startswith("判断の回が止まっている"):

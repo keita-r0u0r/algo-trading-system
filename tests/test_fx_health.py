@@ -135,3 +135,9 @@ def test_closed_market_status_silences_stopped_deciders():
     closed = check_all(NOW, watch={}, live_events=stale, accounts=["ai"], live_enabled=True, killed=False,
                        paper_paused=False, market_status="CLOSE")
     assert [f.state for f in closed if f.name == "ai"] == ["info"]
+
+
+def test_not_live_decider_has_no_decision_row():
+    findings = check_all(NOW, watch=healthy_watch(), live_events=[], accounts=ACCOUNTS, live_enabled=True,
+                         killed=False, paper_paused=False, not_live=list(ACCOUNTS))
+    assert not any(f.name in ACCOUNTS for f in findings)
