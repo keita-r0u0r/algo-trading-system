@@ -606,6 +606,7 @@ resource "google_compute_instance" "watcher" {
   # 反映のたびに仮想マシンを作り直すと、起動とイメージの取り込みで数分止まる。そこで、版（image）と環境変数（watch-env）を
   # メタデータに置き、仮想マシンの中の見張り（fx-watch-update、30秒ごと）が変化に気づいたら、新しいイメージを先に取ってから
   # コンテナだけを入れ替える（止まるのは十数秒）。メタデータの変更は、仮想マシンを止めずにその場で反映される。
+  # 古いイメージは、取る前に消す（動いているものは消えない）。消さないと、反映を重ねるうちにディスクがいっぱいになって取れなくなる。
   # user-data（起動の手順）を変えたときだけは、反映で -replace=google_compute_instance.watcher[0] を付けて作り直す
   metadata = {
     google-logging-enabled = "true"
@@ -652,7 +653,7 @@ resource "google_compute_instance" "watcher" {
           [Service]
           Type=oneshot
           Environment="HOME=/home/watcher"
-          ExecStart=/bin/bash -c 'set -o pipefail; M=http://metadata.google.internal/computeMetadata/v1/instance/attributes; SIG=$$(curl -sf -H "Metadata-Flavor: Google" $$M/image $$M/watch-env | md5sum) || exit 0; [ "$$SIG" = "$$(cat /home/watcher/applied 2>/dev/null)" ] && exit 0; IMG=$$(curl -sf -H "Metadata-Flavor: Google" $$M/image) || exit 0; /usr/bin/docker-credential-gcr configure-docker --registries ${var.region}-docker.pkg.dev && /usr/bin/docker pull "$$IMG" && systemctl restart fx-watch.service'
+          ExecStart=/bin/bash -c 'set -o pipefail; M=http://metadata.google.internal/computeMetadata/v1/instance/attributes; SIG=$$(curl -sf -H "Metadata-Flavor: Google" $$M/image $$M/watch-env | md5sum) || exit 0; [ "$$SIG" = "$$(cat /home/watcher/applied 2>/dev/null)" ] && exit 0; IMG=$$(curl -sf -H "Metadata-Flavor: Google" $$M/image) || exit 0; /usr/bin/docker-credential-gcr configure-docker --registries ${var.region}-docker.pkg.dev && { /usr/bin/docker image prune -af >/dev/null || true; } && /usr/bin/docker pull "$$IMG" && systemctl restart fx-watch.service'
       - path: /etc/systemd/system/fx-watch-update.timer
         permissions: "0644"
         content: |
