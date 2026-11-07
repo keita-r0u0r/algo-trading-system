@@ -53,7 +53,7 @@ class Cloud:
         self.http = AuthorizedSession(credentials)
         bucket = os.environ["STATE_BUCKET"]
         self.bucket = bucket
-        self.files = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
+        self.files = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n, append_only=n.endswith(".jsonl"))
                       for n in ("fx_live.jsonl", "ai_usage.jsonl", "fx_calendar.json", "jev_usage.jsonl",
                                 "fx_sizing_proposals.jsonl", "fx_shadow.jsonl")]
         self.read_only = [SyncedFile(self.http, bucket, f"state/{n}", state_dir / n)
@@ -61,7 +61,7 @@ class Cloud:
         self.flags = [SyncedFlag(self.http, bucket, "state/KILL_fx_live", state_dir / "KILL_fx_live")]
         #: 短期売買のペーパーの記録。書くのは見張り役だけなので、起動のときだけ取ってきて、あとは上げるだけ
         #: （判断の回の pull で、まだ上げていない分を上書きしないように、他のファイルとは分ける）
-        self.scalp = SyncedFile(self.http, bucket, "state/fx_scalp.jsonl", state_dir / "fx_scalp.jsonl")
+        self.scalp = SyncedFile(self.http, bucket, "state/fx_scalp.jsonl", state_dir / "fx_scalp.jsonl", append_only=True)
 
     def pull(self) -> None:
         for f in [*self.files, *self.read_only, *self.flags]:
